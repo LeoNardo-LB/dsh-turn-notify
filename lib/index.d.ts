@@ -1,5 +1,5 @@
 /**
- * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.1.1
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.2.0
  *
  * 两类通知：
  *   A 提问通知：真人提问进入会话时立即响（内容 = 会话标题 + 提问文本；
@@ -46,6 +46,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "turn-notify";
 export declare const inject: never[];
+/** 点击通知卡片：请求（已开的）Web 页面聚焦到某会话（客户端插件订阅）。 */
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        'turn-notify/focus'(payload: {
+            sessionId: string;
+        }): void;
+    }
+}
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows';
 export interface Config {
     platform: PlatformChoice;
@@ -60,6 +68,11 @@ export interface Config {
     questionTitleTemplate: string;
     questionBodyTemplate: string;
     questionSoundFile: string;
+    clickToFocus: boolean;
+    webUrl: string;
+    deepLinkHash: string;
+    notifyActivateActions: boolean;
+    terminalNotifierPath: string;
     appName: string;
     expireMs: number;
     titleTemplate: string;
@@ -73,10 +86,10 @@ export interface Config {
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
+/** Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。 */
+export declare function buildToastScript(title: string, body: string, launchUrl?: string): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export declare function buildMacNotifyScript(title: string, body: string): string;
-/** Windows toast 显示脚本（导出供测试在真实 PowerShell 下直接验证）。 */
-export declare function buildToastScript(title: string, body: string): string;
 /** Windows 提示音脚本（导出供测试验证）。 */
 export declare function buildSoundScript(file: string): string;
 /** -EncodedCommand 编码（UTF-16LE base64）。 */

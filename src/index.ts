@@ -1,5 +1,5 @@
 /**
- * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.1.1
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.2.0
  *
  * 两类通知：
  *   A 提问通知：真人提问进入会话时立即响（内容 = 会话标题 + 提问文本；
@@ -51,6 +51,13 @@ import Schema from '@deepseek-ai/schemastery'
 export const name = 'turn-notify'
 export const inject = []
 
+/** 点击通知卡片：请求（已开的）Web 页面聚焦到某会话（客户端插件订阅）。 */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'turn-notify/focus'(payload: { sessionId: string }): void
+  }
+}
+
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows'
 type Platform = 'linux' | 'macos' | 'windows'
 
@@ -67,6 +74,11 @@ export interface Config {
   questionTitleTemplate: string
   questionBodyTemplate: string
   questionSoundFile: string
+  clickToFocus: boolean
+  webUrl: string
+  deepLinkHash: string
+  notifyActivateActions: boolean
+  terminalNotifierPath: string
   appName: string
   expireMs: number
   titleTemplate: string
@@ -98,6 +110,11 @@ export const Config: Schema<Config> = Schema.object({
   questionTitleTemplate: Schema.string().default('{title}').description('提问通知标题模板，占位符 {title} {question} {sessionId}'),
   questionBodyTemplate: Schema.string().default('提问：{question}').description('提问通知正文模板，占位符同上'),
   questionSoundFile: Schema.string().default('').description('提问提示音文件；留空 = 与轮次结束共用 soundFile / 平台默认'),
+  clickToFocus: Schema.boolean().default(true).description('点击通知卡片回到对应会话：页面开着则切换并尝试置前，没开则打开浏览器深链（Linux notify-send -A / Windows toast protocol launch / macOS terminal-notifier -open）'),
+  webUrl: Schema.string().default('http://127.0.0.1:3080').description('点击通知打开的 Web 地址（页面没开时的深链目标 base）'),
+  deepLinkHash: Schema.string().default('#dsh-focus=').description('深链 hash 前缀；页面侧客户端插件读取此 hash 定位会话'),
+  notifyActivateActions: Schema.boolean().default(true).description('Linux：notify-send 用 -A/--action（点击后回调）；通知守护进程不支持 action 时置 false 退回普通通知'),
+  terminalNotifierPath: Schema.string().default('terminal-notifier').description('macOS 点击回调依赖的 terminal-notifier 命令（PATH 名或绝对路径）；不存在时 macOS 通知无点击功能（仍正常显示）'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -194,6 +211,26 @@ function appleString(s: string): string {
   return '"' + s.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"'
 }
 
+/** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。 */
+function deepLinkUrl(config: Config, sessionId: string): string {
+  const base = config.webUrl.replace(/\/$/, '')
+  return base + '/' + config.deepLinkHash + encodeURIComponent(sessionId)
+}
+
+/** Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。 */
+export function buildToastScript(title: string, body: string, launchUrl?: string): string {
+  const launch = launchUrl === undefined ? '' : ' activationType="protocol" launch="' + xmlEscape(launchUrl) + '"'
+  const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
+  return [
+    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
+    '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
+    "$xml.LoadXml(" + psSingle(xml) + ")",
+    '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "').Show($toast)",
+  ].join('\n')
+}
+
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export function buildMacNotifyScript(title: string, body: string): string {
   return 'display notification ' + appleString(body) + ' with title ' + appleString(title)
@@ -212,19 +249,6 @@ function xmlEscape(s: string): string {
 /** PowerShell 单引号字面量（'' 转义内嵌单引号）。 */
 function psSingle(s: string): string {
   return "'" + s.replaceAll("'", "''") + "'"
-}
-
-/** Windows toast 显示脚本（导出供测试在真实 PowerShell 下直接验证）。 */
-export function buildToastScript(title: string, body: string): string {
-  const xml = '<toast><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
-  return [
-    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
-    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
-    '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
-    "$xml.LoadXml(" + psSingle(xml) + ")",
-    '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
-    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "').Show($toast)",
-  ].join('\n')
 }
 
 /** Windows 提示音脚本（导出供测试验证）。 */
@@ -262,18 +286,69 @@ export function apply(ctx: Context, config: Config) {
     log('channel "' + channel + '" failed (只警告一次):', msg)
   }
 
+  /**
+   * 点击回调统一入口：先广播给已开的 Web 页面（客户端插件订阅），
+   * 短窗口内无人认领（页面没开）则打开浏览器深链。
+   */
+  let focusClaimed = false
+  ctx.on('turn-notify/focus', ({ sessionId }: { sessionId: string }) => {
+    focusClaimed = true
+    log('focus claimed by web client:', sessionId)
+  })
+  const handleNotificationClick = (sessionId: string): void => {
+    if (!config.clickToFocus) return
+    log('notification click →', sessionId)
+    focusClaimed = false
+    ctx.emit('turn-notify/focus', { sessionId })
+    const t = setTimeout(() => {
+      if (!focusClaimed) {
+        log('no web client claimed; opening deep link:', sessionId)
+        const opener = platform === 'macos' ? 'open' : platform === 'windows' ? 'cmd' : 'xdg-open'
+        const args = platform === 'windows' ? ['/c', 'start', '', deepLinkUrl(config, sessionId)] : [deepLinkUrl(config, sessionId)]
+        run(opener, args, (m) => warnOnce('deep-link', m))
+      }
+    }, 500)
+    if (typeof t === 'object' && t !== null && 'unref' in t) (t as { unref(): void }).unref()
+  }
+
   /** fire-and-forget 桌面通知（按平台分发；notifyCommand 可完全接管）。 */
   const sendDesktop = (title: string, body: string, vars: { title: string; question: string; sessionId: string }): void => {
+    const clickable = config.clickToFocus && config.notifySend
     if (config.notifyCommand) {
       runShellCommand(platform, render(config.notifyCommand, vars), (m) => warnOnce('notify-command', m))
       return
     }
     if (platform === 'linux') {
-      run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
+      // -A（点击 action）隐含 --wait：进程阻塞到卡片关闭/点击，stdout 输出
+      // action 名。fire-and-forget 的 execFile 子进程天然承载这个等待；点击
+      // → exit 0 + stdout=default → 触发回调。守护进程不支持 action 时
+      // notify-send 报错退出，onFail 里降级重发普通通知。
+      if (clickable && config.notifyActivateActions) {
+        const child = execFile('notify-send', ['-a', config.appName, '-t', String(config.expireMs), '-A', 'default=打开会话', title, body], { timeout: 0 }, (err, stdout) => {
+          if (err !== null) {
+            // 守护进程不支持 action（常见于部分 DE）——降级为普通通知
+            run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
+            return
+          }
+          if (String(stdout).trim() === 'default') handleNotificationClick(vars.sessionId)
+        })
+        child.unref?.()
+      } else {
+        run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
+      }
     } else if (platform === 'macos') {
-      run('osascript', ['-e', buildMacNotifyScript(title, body)], (m) => warnOnce('osascript', m))
+      // 点击回调优先 terminal-notifier（-open 点击打开深链）；没有则纯展示
+      if (clickable) {
+        execFile(config.terminalNotifierPath, ['-title', config.appName, '-message', body, '-subtitle', title, '-open', deepLinkUrl(config, vars.sessionId), '-activate', 'com.apple.Safari', '-group', vars.sessionId], { timeout: 0 }, (err) => {
+          if (err !== null) run('osascript', ['-e', buildMacNotifyScript(title, body)], (m) => warnOnce('osascript', m))
+        }).unref?.()
+      } else {
+        run('osascript', ['-e', buildMacNotifyScript(title, body)], (m) => warnOnce('osascript', m))
+      }
     } else if (platform === 'windows') {
-      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body))], (m) => warnOnce('windows-toast', m))
+      // protocol launch：点击 = 系统用默认浏览器打开深链 URL（toast 标准能力）
+      const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
+      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch))], (m) => warnOnce('windows-toast', m))
     } else {
       warnOnce('platform', '未知平台（process.platform=' + process.platform + '），只有 bell/command 通道可用')
     }

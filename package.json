@@ -1,16 +1,30 @@
 {
   "name": "dsh-turn-notify",
   "description": "DSH bundle plugin: desktop notification (session title + first N chars of the user prompt) / sound / bell / custom command when the agent truly stops for user input (goal auto-continuation rounds stay silent). Cross-platform: Linux notify-send, macOS osascript, Windows toast.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "lib",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "scripts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "postinstall": "bash scripts/patch-dsh-api-remotes.sh || true",
     "test": "node tests/goal-logic.mjs"
   },
   "license": "MIT",
@@ -32,11 +46,19 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2",
     "typescript": "5.9.3"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-runtime"
+      ]
     }
   }
 }
