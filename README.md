@@ -4,7 +4,7 @@ DSH bundle 插件：**提问到达时 + agent 真正停下等用户输入时发�
 弥补 dsh 0.1.1-rc.2 没有任何原生 turn 提示通道的问题。
 
 跨平台：**Linux**（notify-send + paplay）/ **macOS**（osascript + afplay）/
-**Windows**（PowerShell WinRT Toast + SoundPlayer）。
+**Windows**（PowerShell WinRT Toast + SoundPlayer）。三平台均在真内核 CI 上验证。
 
 ## 何时通知（goal 判别）
 
@@ -112,11 +112,18 @@ dsh plugin --profile web remove dsh-turn-notify
 安装后**重启该 profile 的宿主进程**才加载（bundles 清单是启动时解析的；
 settings.yaml 的配置修改则是热生效）。
 
-已实测：dsh 0.1.1-rc.2（Linux 真机：本地 link: 安装 + GitHub git 安装
-真实装载、通知/提示音/goal 判别/模板；Windows 路径经 Linux pwsh 三层
-工装验证至 WinRT 边界，toast 显示待真机；macOS 后端按官方 API 实现）。
+已实测：dsh 0.1.1-rc.2。三平台 CI（Linux / windows-latest / macos-latest
+真内核）：Linux 真机端到端（本地 link: + GitHub git 安装、通知/提示音/
+goal 判别/模板）；**macOS 端到端**（CI osascript 通知真实提交通知中心、
+afplay 真实播放系统音效）；Windows 至通知平台提交（headless Server 上
+止于 Show() 的 RPC 边界，有桌面会话即显示；XmlDocument WinRT 激活已按
+真内核 CI 发现修复）。
 
 ## 开发
+
+验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真，任意平台）、
+`node tests/windows-pwsh.mjs [powershell/pwsh]`（Windows 路径）、
+`node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
 
 包入口是编译产物 `lib/index.js`（Node 拒绝对 node_modules 下的 .ts 做
 类型剥离，真实安装必须携带 JS；产物随仓库提交，git 安装即装即用、
