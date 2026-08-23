@@ -63,8 +63,12 @@ const launchUrl = 'http://127.0.0.1:3080/#dsh-focus=session-click-test'
 const decodedClick = Buffer.from(encodePs(buildToastScript('T', 'B', launchUrl)), 'base64').toString('utf16le')
 assert.ok(decodedClick.includes('activationType="protocol"'), 'toast XML 应含 protocol 激活类型')
 assert.ok(decodedClick.includes('launch="' + launchUrl + '"'), 'toast XML 应含深链 launch 属性')
+// 静音断言（双音效回归锁）：toast 自带默认系统音必须显式静音——
+// 平台唯一音源是 sound 通道的 SoundPlayer，两者叠加即“两个音效一起响”
+assert.ok(decodedClick.includes('<audio silent="true"/>'), 'toast XML 应含 <audio silent="true"/>（系统默认音静音，SoundPlayer 为唯一音源）')
 const decodedPlain = Buffer.from(encodePs(buildToastScript('T', 'B')), 'base64').toString('utf16le')
 assert.ok(!decodedPlain.includes('activationType'), '无深链时不应有激活属性')
+assert.ok(decodedPlain.includes('<audio silent="true"/>'), '无深链 toast 同样必须静音（sound=false 时也不该有系统音）')
 
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)

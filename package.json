@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
-    "test": "node tests/goal-logic.mjs"
+    "test": "node tests/goal-logic.mjs && node tests/client-logic.mjs"
   },
   "license": "MIT",
   "keywords": [

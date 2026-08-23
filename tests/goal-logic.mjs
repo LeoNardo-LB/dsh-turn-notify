@@ -46,6 +46,7 @@ const config = {
   fallbackMessage: '回复结束',
   questionChars: 40,
   minRunMs: 0,
+  presenceTimeoutMs: 600, // → pollHoldMs=300ms：H2 空轮询挂起时长短且确定
 }
 ctx.plugin(plugin, config)
 await sleep(150) // 等 apply 注册完监听再发事件
@@ -101,22 +102,67 @@ const afterG = readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean).leng
 assert.equal(afterG, beforeG, '子代理的轮次结束与提问都不得触发通知')
 console.log('SUBAGENT-FILTERED-OK（通知数不变：' + beforeG + ' → ' + afterG + '）')
 
-console.log('--- H: 点击双路径（心跳新鲜→转发事件 / 无心跳→深链）---')
-// 伪造 webServer 服务捕获路由注册，伪造转发事件监听
-let presenceHandler = null
-const focusEvents = []
-ctx.provide('webServer', { register: (route) => { presenceHandler = route.handler; return () => {} } })
-ctx.on('turn-notify/focus', (p) => focusEvents.push(p.sessionId))
-// H1: 无心跳（过期）→ 深链路径。观察方式：command 通道收到即代表走到深链分支
-// （深链与转发共用 command？否——command 在通知触发时就跑；这里借助日志断言。
-// 直接调用不可行（未导出），改用行为差异：转发路径不发深链。）
-// 仿真里 xdg-open 会真的执行——用不可执行命令无害化：设置 webUrl 使深链打开失败只告警。
-const beforeWarn = 0
-// H1: 无心跳：通知+点击（用 -A stdout=default 模拟不可行——sim 直接调 handler 不现实）
-// H 简化为端点级验证：心跳端点更新新鲜度（直接调捕获的 handler）
-const fakeRes = { writeHead: (c) => ({ end: () => {} }) }
-presenceHandler?.(null, fakeRes)
-console.log('PRESENCE-OK：心跳端点 handler 可调用')
+console.log('--- H: 聚焦通道（focus-wait 长轮询 + focus 广播入队）---')
+// 伪造 webServer 服务捕获两条路由的 handler，在 HTTP 语义层驱动：
+//   H1 GET focus-wait 挂起期间 POST focus → 挂起请求被唤醒并带回条目
+//   H2 GET focus-wait 无新条目 → 挂起至 pollHoldMs 后空返回（config.presenceTimeoutMs=600 → hold=300ms）
+const routes = new Map()
+ctx.provide('webServer', { register: (route) => { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
+await sleep(50)
+const waitHandler = routes.get('/turn-notify/focus-wait')
+const postHandler = routes.get('/turn-notify/focus')
+assert.ok(typeof waitHandler === 'function', 'focus-wait 路由应已注册')
+assert.ok(typeof postHandler === 'function', 'focus 路由应已注册')
+
+const makeRes = () => {
+  let resolve
+  const done = new Promise((r) => { resolve = r })
+  const res = {
+    code: 0, body: '',
+    writeHead(c) { res.code = c; return res },
+    end(b) { res.body = String(b ?? ''); resolve(res); return res },
+  }
+  return { res, done }
+}
+// H1: 挂起 → 唤醒
+const h1 = makeRes()
+let h1result = null
+const h1p = Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t1&since=0' }, h1.res)).then(() => h1.done).then((r) => { h1result = r })
+await sleep(120)
+assert.equal(h1result, null, '无新条目时 focus-wait 必须挂起（长轮询），不得立即返回')
+const bodyChunks = []
+const bodyEmitter = {
+  on(ev, fn) { if (ev === 'data') bodyChunks.push(fn); if (ev === 'end') this._end = fn; if (ev === 'error') this._err = fn; return this },
+  _end: null, _err: null, _dataFns: null,
+}
+// 直接以 data/end 事件回放 JSON body（模拟 http 流）
+const postRes = makeRes()
+const postP = Promise.resolve(postHandler(bodyEmitter, postRes.res))
+await sleep(0)
+for (const fn of bodyChunks) fn(Buffer.from(JSON.stringify({ sessionId: 'sim-focus-1' })))
+bodyEmitter._end()
+await postP
+await postRes.done
+assert.equal(postRes.res.code, 204, 'POST focus 应回 204')
+await h1p
+assert.ok(h1result !== null && h1result.code === 200, '唤醒后 focus-wait 应回 200')
+const payload = JSON.parse(h1result.body)
+assert.equal(payload.entries.length, 1, '唤醒应带回恰好 1 条聚焦条目')
+assert.equal(payload.entries[0].sessionId, 'sim-focus-1', '聚焦条目应含正确 sessionId')
+assert.ok(typeof payload.entries[0].seq === 'number' && payload.entries[0].seq > 0, '条目应带递增 seq')
+console.log('FOCUS-WAKE-OK：挂起被 POST 唤醒并带回条目')
+// H2: 无新条目 → 挂起至超时空返回（keepAlive 保事件循环：hold 定时器是 unref 的，
+// 真实进程有 http server 常驻、测试进程需要自持）
+const keepAlive = setInterval(() => {}, 1000)
+const h2 = makeRes()
+const h2p = Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t1&since=' + payload.entries[0].seq }, h2.res)).then(() => h2.done)
+const t0 = Date.now()
+const h2result = await Promise.race([h2p, sleep(5000).then(() => { throw new Error('focus-wait 空轮询超时未返回') })])
+clearInterval(keepAlive)
+assert.ok(Date.now() - t0 >= 400, '空轮询应挂起至少 pollHoldMs-余量（实际 ' + (Date.now() - t0) + 'ms）')
+assert.equal(h2result.code, 200, '超时空返回也是 200')
+assert.equal(JSON.parse(h2result.body).entries.length, 0, '空返回应无条目')
+console.log('FOCUS-HOLD-OK：空轮询挂起 ' + (Date.now() - t0) + 'ms 后空返回')
 
 console.log('--- F: 恢复会话标题读穿（服务折叠兜底）---')
 const agent2 = { session: { id: 'sim-session-2', header: {} } }

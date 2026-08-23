@@ -10,14 +10,19 @@
  *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
- * 点击通知卡片 → 回到对应会话（双路径复用，不重复开浏览器）：
- *   Web 客户端插件在页面打开期间持续 POST /turn-notify/presence 心跳
- *   （本插件经 webServer 服务注册该端点）。点击时心跳新鲜
- *   （< presenceTimeoutMs）= 页面已开 → 经转发事件 turn-notify/focus
- *   直接让已开页面切换会话，零浏览器启动；心跳过期 = 页面未开 →
- *   OS 深链打开（Linux notify-send -A → xdg-open / Windows toast
- *   protocol launch / macOS terminal-notifier -open），新开页面读
- *   hash 定位会话并开始心跳，后续点击即复用。
+ * 点击通知卡片 → 回到对应会话：
+ *   聚焦通道（本插件经 webServer 服务注册）：GET /turn-notify/focus-wait
+ *   长轮询（web 页面打开期间保持一个挂起请求，到达即记为页面在线
+ *   presence）+ POST /turn-notify/focus（深链落地页广播聚焦，让其它已开
+ *   标签页同步切换）。
+ *   Linux notify-send -A 把点击回调进宿主进程：页面在线 → 点击入队，
+ *   已开页面零浏览器启动直接切换；离线 → xdg-open 深链新开浏览器。
+ *   Windows toast protocol launch / macOS terminal-notifier -open 的点击
+ *   = 系统直接用浏览器打开深链 URL（无进程回调通道），浏览器已开时平台
+ *   行为是新开标签页——落地页读 hash 聚焦正确会话（带列表竞态重试）并
+ *   广播其它标签页同步切换。Windows toast 恒定 <audio silent="true"/>：
+ *   平台唯一音源是 sound 通道（SoundPlayer），否则系统默认音与其叠加
+ *   成双音效。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
@@ -57,17 +62,20 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import Schema from '@deepseek-ai/schemastery'
+
+/** 包版本（启动日志用；读取失败退回 unknown）。 */
+const PKG_VERSION: string = (() => {
+  try {
+    return (createRequire(import.meta.url)('../package.json') as { version?: string }).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
 
 export const name = 'turn-notify'
 export const inject = []
-
-/** 点击通知：聚焦到会话（经转发事件送达已开的 Web 页面）。 */
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    'turn-notify/focus'(payload: { sessionId: string }): void
-  }
-}
 
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows'
 type Platform = 'linux' | 'macos' | 'windows'
@@ -122,12 +130,12 @@ export const Config: Schema<Config> = Schema.object({
   questionTitleTemplate: Schema.string().default('{title}').description('提问通知标题模板，占位符 {title} {question} {sessionId}'),
   questionBodyTemplate: Schema.string().default('提问：{question}').description('提问通知正文模板，占位符同上'),
   questionSoundFile: Schema.string().default('').description('提问提示音文件；留空 = 与轮次结束共用 soundFile / 平台默认'),
-  clickToFocus: Schema.boolean().default(true).description('点击通知卡片回到对应会话：页面开着则切换并尝试置前，没开则打开浏览器深链（Linux notify-send -A / Windows toast protocol launch / macOS terminal-notifier -open）'),
+  clickToFocus: Schema.boolean().default(true).description('点击通知卡片回到对应会话：Linux 复用已开页面（零新标签页）；Windows/macOS 点击=系统用浏览器打开深链（浏览器已开时平台行为是新开标签页，落地即正确会话，其它标签页同步切换）'),
   webUrl: Schema.string().default('http://127.0.0.1:3080').description('点击通知打开的 Web 地址（页面没开时的深链目标 base）'),
   deepLinkHash: Schema.string().default('#dsh-focus=').description('深链 hash 前缀；页面侧客户端插件读取此 hash 定位会话'),
   notifyActivateActions: Schema.boolean().default(true).description('Linux：notify-send 用 -A/--action（点击后回调）；通知守护进程不支持 action 时置 false 退回普通通知'),
   terminalNotifierPath: Schema.string().default('terminal-notifier').description('macOS 点击回调依赖的 terminal-notifier 命令（PATH 名或绝对路径）；不存在时 macOS 通知无点击功能（仍正常显示）'),
-  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面心跳新鲜度阈值（毫秒）：点击时心跳新鲜 = 页面已开，走事件转发复用页面（零浏览器启动）；超过阈值视为未开，深链新开浏览器'),
+  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒）：focus-wait 长轮询最近到达时间在阈值内 = 页面已开，Linux 点击走零启动复用；超过视为未开，深链新开浏览器'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -230,10 +238,14 @@ function deepLinkUrl(config: Config, sessionId: string): string {
   return base + '/' + config.deepLinkHash + encodeURIComponent(sessionId)
 }
 
-/** Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。 */
+/**
+ * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
+ * 恒定 <audio silent="true"/>：toast 自带默认系统音必须显式静音，平台
+ * 唯一音源是 sound 通道（SoundPlayer）——否则两声叠加成双音效。
+ */
 export function buildToastScript(title: string, body: string, launchUrl?: string): string {
   const launch = launchUrl === undefined ? '' : ' activationType="protocol" launch="' + xmlEscape(launchUrl) + '"'
-  const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
+  const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual><audio silent="true"/></toast>'
   return [
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
     '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
@@ -300,69 +312,150 @@ export function apply(ctx: Context, config: Config) {
   }
 
   /**
-   * 转发白名单运行时注入：apiproxy 以 live 引用读取
-   * API_REMOTE_FORWARDED_EVENTS（每次客户端订阅 events.mux 时 map），
-   * push 即对后续连接生效，无需改宿主文件。该包因上游未全发布不能作
-   * 静态依赖，动态 import（先常规解析，再从宿主入口 resolve 兜底）。
+   * 聚焦通道（经 webServer 服务注册，web 客户端插件消费）：
+   *   GET  /turn-notify/focus-wait?client=<id>&since=<seq> —— 长轮询。有
+   *        未消费点击立即返回；否则挂起至多 pollHoldMs 后空返回。每次
+   *        到达即刷新该 client 的 presence（Linux 复用路径的“页面已开”
+   *        判据；替代 v0.2.2-dev.4 的转发白名单注入——那条路在所有平台
+   *        都解析不到 dsh-api-remotes 的同一模块实例，从未生效过）。
+   *   POST /turn-notify/focus —— 深链落地页广播聚焦：入队分发给所有长
+   *        轮询页面（其它已开标签页同步切换）。
    */
-  let forwardingReady = false
-  const setupForwarding = async (): Promise<void> => {
-    if (forwardingReady) return
-    const EVENT = 'turn-notify/focus'
-    const probe = async (spec: string): Promise<string[] | undefined> => {
-      try {
-        const mod = (await import(spec)) as { API_REMOTE_FORWARDED_EVENTS?: string[] }
-        return Array.isArray(mod.API_REMOTE_FORWARDED_EVENTS) ? mod.API_REMOTE_FORWARDED_EVENTS : undefined
-      } catch { return undefined }
-    }
-    let arr = await probe('@deepseek-ai/dsh-api-remotes')
-    if (arr === undefined) {
-      // 兜底：从宿主入口（dsh bin）解析——插件进程内 argv[1] 即宿主
-      try {
-        const { createRequire } = await import('node:module')
-        const hostRequire = createRequire(process.argv[1] ?? process.execPath)
-        const resolved = hostRequire.resolve('@deepseek-ai/dsh-api-remotes')
-        arr = await probe('file://' + resolved)
-      } catch { /* 保持 undefined */ }
-    }
-    if (arr === undefined) {
-      warnOnce('forwarding', 'dsh-api-remotes 不可解析：转发事件不可用，点击将始终走深链（会开新标签页）')
-      return
-    }
-    if (!arr.includes(EVENT)) arr.push(EVENT)
-    forwardingReady = true
-    log('转发白名单已注入: ' + EVENT + '（后续 Web 连接可接收）')
-  }
-  void setupForwarding()
+  interface FocusEntry { seq: number; sessionId: string; ts: number }
+  interface FocusWaiter { since: number; respond: (entries: FocusEntry[]) => void }
+  const focusQueue: FocusEntry[] = []
+  const focusWaiters = new Set<FocusWaiter>()
+  const presenceSeen = new Map<string, number>()
+  let focusSeq = 0
+  const pollHoldMs = Math.max(500, Math.min(10_000, Math.floor(config.presenceTimeoutMs / 2)))
+  const FOCUS_TTL_MS = 60_000
+  const FOCUS_QUEUE_MAX = 32
 
-  /** Web 页面心跳：POST /turn-notify/presence（页面开着期间客户端插件定期上报）。 */
-  let presenceLastSeen = 0
+  const trimFocusQueue = (): void => {
+    const now = Date.now()
+    while (focusQueue.length > 0 && (focusQueue[0].ts < now - FOCUS_TTL_MS || focusQueue.length > FOCUS_QUEUE_MAX)) {
+      focusQueue.shift()
+    }
+  }
+
+  const enqueueFocus = (sessionId: string): void => {
+    trimFocusQueue()
+    focusQueue.push({ seq: ++focusSeq, sessionId, ts: Date.now() })
+    const waiters = [...focusWaiters]
+    focusWaiters.clear()
+    for (const w of waiters) w.respond(focusQueue.filter(e => e.seq > w.since))
+  }
+
+  /** 页面在线判据：任一 client 的长轮询最近到达时间在阈值内。 */
+  const presenceFresh = (): boolean => {
+    const now = Date.now()
+    let fresh = false
+    for (const [client, ts] of presenceSeen) {
+      if (now - ts > config.presenceTimeoutMs * 3) presenceSeen.delete(client)
+      else if (now - ts < config.presenceTimeoutMs) fresh = true
+    }
+    return fresh
+  }
+
+  interface FocusRes {
+    writeHead(code: number, headers?: Record<string, string>): FocusRes
+    end(body?: unknown): void
+  }
   interface WebServerLike {
-    register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: unknown, res: { writeHead(code: number): { end(): void } }) => void }): () => void
+    register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: unknown, res: FocusRes) => void }): () => void
   }
   ctx.inject(['webServer'], (scope) => {
     const wsCtx = scope as Context & { webServer: WebServerLike }
-    const dispose = wsCtx.webServer.register({
+    const disposeWait = wsCtx.webServer.register({
       kind: 'exact',
-      path: '/turn-notify/presence',
-      handler: (_req, res) => {
-        presenceLastSeen = Date.now()
-        res.writeHead(204).end()
+      path: '/turn-notify/focus-wait',
+      handler: (req, res) => {
+        const url = new URL((req as { url?: string }).url ?? '/', 'http://x')
+        const client = String(url.searchParams.get('client') ?? '').slice(0, 64)
+        const since = Number(url.searchParams.get('since') ?? '0') || 0
+        if (client.length > 0) presenceSeen.set(client, Date.now())
+        trimFocusQueue()
+        const respond = (entries: FocusEntry[]): void => {
+          try {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({ entries: entries.map(e => ({ seq: e.seq, sessionId: e.sessionId })) }))
+          } catch { /* 客户端已断开：挂起响应作废 */ }
+        }
+        const pending = focusQueue.filter(e => e.seq > since)
+        if (pending.length > 0) {
+          respond(pending)
+          return
+        }
+        const timer = setTimeout(() => {
+          focusWaiters.delete(waiter)
+          waiter.respond([])
+        }, pollHoldMs)
+        if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+          ;(timer as { unref(): void }).unref()
+        }
+        const waiter: FocusWaiter = {
+          since,
+          respond: (entries) => {
+            clearTimeout(timer)
+            respond(entries)
+          },
+        }
+        focusWaiters.add(waiter)
       },
     })
-    log('心跳端点已注册: POST /turn-notify/presence')
-    wsCtx.effect(() => dispose, 'turn-notify: presence route')
+    const disposePost = wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/turn-notify/focus',
+      handler: (req, res) => {
+        const chunks: Buffer[] = []
+        const r = req as { on?: (ev: string, fn: (d?: Buffer) => void) => unknown }
+        const finish = (sessionId: string): void => {
+          if (sessionId.length > 0 && sessionId.length <= 256) {
+            log('focus 广播 →', sessionId)
+            enqueueFocus(sessionId)
+          }
+          try {
+            res.writeHead(204).end()
+          } catch { /* 客户端已断开 */ }
+        }
+        if (typeof r.on !== 'function') {
+          finish('')
+          return
+        }
+        let size = 0
+        r.on('data', (d) => {
+          size += (d ?? Buffer.alloc(0)).length
+          if (size <= 1_000_000) chunks.push(d ?? Buffer.alloc(0))
+        })
+        r.on('end', () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { sessionId?: unknown }
+            finish(typeof body.sessionId === 'string' ? body.sessionId : '')
+          } catch {
+            finish('')
+          }
+        })
+        r.on('error', () => finish(''))
+      },
+    })
+    log('聚焦通道已注册: GET /turn-notify/focus-wait（长轮询 ' + pollHoldMs + 'ms）+ POST /turn-notify/focus')
+    wsCtx.effect(() => () => {
+      disposeWait()
+      disposePost()
+      for (const w of [...focusWaiters]) w.respond([])
+    }, 'turn-notify: focus routes')
   })
 
   /**
-   * 点击回调双路径：心跳新鲜（页面已开）→ 转发事件直达已开页面切会话，
-   * 零浏览器启动（不重复开标签页）；过期（页面未开）→ OS 深链打开，
-   * 新页面读 hash 定位会话并开始心跳，后续点击即走复用路径。
+   * 点击回调（Linux notify-send -A 的进程内回调）：页面在线 → 入队分发
+   * 给已开页面（零浏览器启动，不重复开标签页）；离线 → OS 深链打开，
+   * 新页面读 hash 定位会话并开始长轮询，后续点击即走复用路径。
+   * Windows/macOS 无进程内回调（点击=系统直接用浏览器打开深链 URL）。
    */
   const handleNotificationClick = (sessionId: string): void => {
-    if (forwardingReady && Date.now() - presenceLastSeen < config.presenceTimeoutMs) {
-      log('notification click → 转发给已开 Web 页面:', sessionId)
-      ctx.emit('turn-notify/focus', { sessionId })
+    if (presenceFresh()) {
+      log('notification click → 分发给已开 Web 页面:', sessionId)
+      enqueueFocus(sessionId)
       return
     }
     log('notification click → 无活跃页面，深链打开:', sessionId)
@@ -582,7 +675,7 @@ export function apply(ctx: Context, config: Config) {
     notify()
   })
 
-  log('loaded; v0.2.1 platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
+  log('loaded; v' + PKG_VERSION + ' platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
     notifySend: config.notifySend, sound: config.sound, bell: config.bell,
     command: config.command ? '(custom)' : '(off)', rootOnly: config.rootOnly,
     questionChars: config.questionChars, skipGoalRounds: config.skipGoalRounds,

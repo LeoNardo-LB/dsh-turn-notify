@@ -130,20 +130,36 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
 
 ## 开发
 
-## 点击通知 → 回到会话（双路径复用）
+## 点击通知 → 回到会话（聚焦通道）
 
-目标：**页面已开则复用（零浏览器启动），未开才新开浏览器**——不会重复开标签页。
+目标：**页面已开则复用（Linux 零浏览器启动），落地必达正确会话**。
 
-- Web 客户端插件在页面打开期间每 5 秒 POST `/turn-notify/presence`
-  心跳（服务端插件经 webServer 服务的 register API 注册该端点，
-  不改任何宿主文件）；
-- 点击时心跳新鲜（< `presenceTimeoutMs`，默认 15s）= 页面已开 →
-  宿主 emit `turn-notify/focus` 转发事件（白名单经运行时注入，
-  apiprox 以 live 引用读取、新连接即生效）→ 已开页面直接
-  `sessions.open` 切换会话；
-- 心跳过期 = 页面未开 → OS 深链（Linux `notify-send -A` → xdg-open /
-  Windows toast protocol launch / macOS terminal-notifier `-open`）新开浏览器，
-  页面读 `#dsh-focus=<sessionId>` 定位会话并开始心跳，后续点击即复用。
+聚焦通道（本插件经 webServer 服务的 register API 注册，不改任何宿主文件；
+替代 dev.4 的转发白名单注入——那条路解析不到 dsh-api-remotes 的同一
+模块实例，在所有平台都从未生效过）：
+
+- **GET `/turn-notify/focus-wait?client=<uuid>&since=<seq>` 长轮询**：
+  web 客户端插件在页面打开期间持续保持一个挂起请求（默认挂 7.5s、
+  空返回后立即续接）。点击 → 服务端入队 → 挂起请求**立即**返回
+  `{entries:[{seq,sessionId}]}` → 页面 `sessions.open` 切换会话。
+  该轮询同时就是 presence：到达即记为“页面已开”。
+- **POST `/turn-notify/focus`**：深链落地页广播聚焦（让其它已开标签页
+  同步切换）。
+
+平台点击路径：
+
+- **Linux**（`notify-send -A` 进程内回调）：页面在线（长轮询新鲜，
+  < `presenceTimeoutMs` 默认 15s）→ 入队分发已开页面，**零浏览器
+  启动、不重复开标签页**；离线 → xdg-open 深链新开浏览器。
+- **Windows / macOS**：toast protocol launch / terminal-notifier `-open`
+  的点击 = 系统直接用浏览器打开深链 URL——**没有进程内回调通道**，
+  浏览器已开时平台行为就是新开一个标签页（浏览器平台限制，非插件
+  行为）。落地页读 `#dsh-focus=<sessionId>` 聚焦正确会话（带会话
+  列表竞态重试：新页列表异步晚到，`open` 对未列出会话抛错，
+  250ms 重试至列表到达、至多 15s），并 POST 广播让其它标签页同步切换。
+- **Windows toast 恒定 `<audio silent="true"/>`**：toast 自带默认系统音
+  显式静音，平台唯一音源是 sound 通道（SoundPlayer）——否则两声
+  叠加成双音效。
 
 点击跳转的真机校验工具（CI 无法覆盖最后一环——runner 无桌面通知环境）：
 
@@ -157,9 +173,11 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
   protocol-launch toast，点击（默认人工，`--auto` 尝试 UIA 自动点击会动鼠标）后
   默认浏览器打开深链，监听器收到即 PASS。
 
-验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真，任意平台）、
-`node tests/windows-pwsh.mjs [powershell/pwsh]`（Windows 路径）、
-`node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
+验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真 + 聚焦通道路由级
+长轮询验证，任意平台）、`node tests/client-logic.mjs`（浏览器端逻辑：
+深链聚焦重试 / 长轮询消费 / 广播——直接驱动构建产物）、
+`node tests/windows-pwsh.mjs [powershell/pwsh]`（Windows 路径，含 toast
+静音断言）、`node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
 
 包入口是编译产物 `lib/index.js`（Node 拒绝对 node_modules 下的 .ts 做
 类型剥离，真实安装必须携带 JS；产物随仓库提交，git 安装即装即用、
@@ -182,10 +200,15 @@ pnpm test             # goal 判别逻辑仿真测试
 - goal/changed 不含 turn 结束原因；如需区分 completed/aborted/error
   要另听 session/event 的 turn/end。
 - pre-release 的 dsh 对事件面无兼容承诺；事件名/形状变更需跟进适配。
-- 心跳时序边界：页面开着但心跳刚过期（如系统睡眠唤醒瞬间）会被判为
-  未开 → 深链新开一个标签页（同样定位到目标会话，之后恢复复用路径）。
+- 长轮询时序边界：页面开着但轮询刚中断（如系统睡眠唤醒瞬间）会被判为
+  未开 → Linux 深链新开一个标签页（同样定位到目标会话，之后恢复复用路径）。
+- **Windows/macOS 浏览器已开时，点击通知必然新开一个标签页**（浏览器
+  打开 URL 的平台行为，无原生 helper 无法拦截）；落地页聚焦正确会话、
+  其它已开标签页同步切换。Linux 不受此限（进程内回调 + 长轮询复用）。
 - 复用路径切换会话后不强制置前浏览器窗口（浏览器禁止无手势的前台抢占）；
   通知点击本身在多数桌面环境会带出浏览器，个别情况需手动切到浏览器。
+- 多标签页同源都会收到聚焦条目并切换（有意的收敛语义：无论最后看哪个
+  标签页，都在正确会话上）。
 
 ## License
 

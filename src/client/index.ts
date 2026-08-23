@@ -1,21 +1,25 @@
 /**
- * dsh-turn-notify browser half：点击通知卡片 → 回到对应会话（复用优先）。
+ * dsh-turn-notify browser half：聚焦通道消费端。
  *
- * 双路径配合服务端：
- *   1. 心跳：页面打开期间定期 POST /turn-notify/presence（服务端插件注册
- *      的端点）。宿主点击通知时心跳新鲜 = 页面已开 → 经转发事件
- *      turn-notify/focus 直达本页（零浏览器启动、不重复开标签页）。
- *   2. 深链兜底：页面未开时宿主经 OS 深链新开（#dsh-focus=<sessionId>），
- *      本页读 hash 定位会话后清 hash，并开始心跳供后续点击复用。
- *   3. BroadcastChannel：深链页广播 focus → 已开标签页（leader）同步切换。
- *   4. document.title 稳定标记（"— DSH" 后缀）。
+ * 与服务端插件配套（经本包 webServer 路由）：
+ *   1. 长轮询 GET /turn-notify/focus-wait?client=<uuid>&since=<seq>：
+ *      页面打开期间持续保持一个挂起请求；点击通知 → 服务端入队 →
+ *      挂起请求立即返回 {entries:[{seq,sessionId}]} → 本页切换会话。
+ *      该轮询同时就是 presence：服务端据此判定“页面已开”，Linux 上
+ *      点击复用已开页面、零浏览器启动。
+ *   2. 深链兜底：页面未开时宿主经 OS 深链新开（#dsh-focus=<sessionId>，
+ *      Windows toast / macOS terminal-notifier 的点击即此路径），本页读
+ *      hash 聚焦会话，并 POST /turn-notify/focus 广播让其它已开标签页
+ *      同步切换。
+ *   3. 会话列表竞态重试：新开页面的会话列表异步晚到，open() 对未列出
+ *      会话直接抛错——聚焦带重试（250ms 间隔、至多 15s），列表到达
+ *      即成功；旧实现单次失败即吞掉，导致落地页停在恢复的旧会话上。
  *
  * @module dsh-turn-notify/client
  */
 /** 客户端上下文最小面（官方 runtime 的类型依赖未全发布，本地同款声明）。 */
 interface ClientContext {
   sessions: unknown
-  remote: unknown
   effect(fn: () => unknown, label?: string): void
 }
 
@@ -24,84 +28,96 @@ interface SessionsLike {
   open(id: string): void
 }
 
-/** 宿主转发事件面（转发帧无运行时白名单校验，事件名分发）。 */
-interface FocusRemote {
-  $on(event: 'turn-notify/focus', handler: (payload: { sessionId: string }) => void): () => void
-}
-
-export const inject = ['sessions', 'remote']
+export const inject = ['sessions']
 
 /** 深链 hash 前缀（与服务端 deepLinkHash 配置一致）。 */
 export const FOCUS_HASH_PREFIX = '#dsh-focus='
 
-/** 心跳间隔（毫秒）。服务端新鲜度阈值 presenceTimeoutMs 默认 15s，5s 上报留足余量。 */
-const HEARTBEAT_MS = 5000
+/** 会话列表竞态重试参数：间隔与总预算（约 15s）。 */
+const RETRY_MS = 250
+const RETRY_MAX = 60
+
+/** 轮询失败（断连/服务重启）后的退避。 */
+const POLL_ERROR_BACKOFF_MS = 2000
 
 export function apply(ctx: ClientContext): void {
   const log = (...a: unknown[]) => console.log('[turn-notify/client]', ...a)
 
   const sessions = ctx.sessions as SessionsLike
-  const remote = ctx.remote as unknown as FocusRemote
+  let stopped = false
 
-  /** 定位到会话（不在列表时 open 会 fail loud，捕获后仅记录）。 */
+  /** 定位到会话；列表未列出时按 RETRY_MS 重试（新开页面列表竞态）。 */
   const focusSession = (sessionId: string, from: string): void => {
-    try {
-      sessions.open(sessionId)
-      window.focus()
-      log('focused session', sessionId, 'via', from)
-    } catch (err) {
-      log('open failed (session not in list?):', sessionId, String(err))
+    let attempts = 0
+    const attempt = (): void => {
+      if (stopped) return
+      try {
+        sessions.open(sessionId)
+        window.focus()
+        log('focused session', sessionId, 'via', from)
+      } catch (err) {
+        // 会话列表尚未到达（新开页面）：open 对未列出会话抛错，重试到列表到达
+        if (++attempts < RETRY_MAX) {
+          setTimeout(attempt, RETRY_MS)
+        } else {
+          log('open failed after retries (session unknown):', sessionId, String(err))
+        }
+      }
     }
+    attempt()
   }
 
-  // ---- 1) 宿主转发事件：点击通知 → 已开页面直接切会话 ----
-  ctx.effect(() => {
-    const dispose = remote.$on('turn-notify/focus', ({ sessionId }) => {
-      focusSession(sessionId, 'host-event')
-    })
-    return dispose as unknown as () => void
-  }, 'turn-notify-client: focus subscription')
-
-  // ---- 2) 心跳上报（页面开着期间持续；失败静默——端点未部署时退化为纯深链模式） ----
-  const beat = (): void => {
-    fetch('/turn-notify/presence', { method: 'POST', keepalive: true }).catch(() => {})
+  // ---- 1) 长轮询：点击聚焦 + presence ----
+  let lastSeq = 0
+  const clientId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2)
+  const pollTimer: ReturnType<typeof setTimeout>[] = []
+  const poll = async (): Promise<void> => {
+    if (stopped) return
+    let ok = false
+    try {
+      const res = await fetch('/turn-notify/focus-wait?client=' + clientId + '&since=' + lastSeq)
+      if (res.ok) {
+        ok = true
+        const data = await res.json().catch(() => null) as { entries?: { seq?: unknown; sessionId?: unknown }[] } | null
+        if (data !== null && Array.isArray(data.entries)) {
+          for (const e of data.entries) {
+            // 去重守卫：只消费比本地进度新的条目（服务端已按 since 过滤，
+            // 此处防中间层/旧响应重放导致重复聚焦）
+            if (typeof e.seq !== 'number' || e.seq <= lastSeq) continue
+            lastSeq = e.seq
+            if (typeof e.sessionId === 'string' && e.sessionId.length > 0) focusSession(e.sessionId, 'focus-wait')
+          }
+        }
+      }
+    } catch {
+      /* 连接中断/服务重启：退避后重试 */
+    }
+    if (stopped) return
+    const timer = setTimeout(poll, ok ? 0 : POLL_ERROR_BACKOFF_MS)
+    pollTimer.push(timer)
   }
-  beat()
-  const timer = setInterval(beat, HEARTBEAT_MS)
-  ctx.effect(() => () => clearInterval(timer), 'turn-notify-client: heartbeat')
+  void poll()
+  ctx.effect(() => () => {
+    stopped = true
+    for (const t of pollTimer) clearTimeout(t)
+  }, 'turn-notify-client: focus poll')
 
-  // ---- 3) 深链：本页从通知打开 ----
-  const applyDeepLink = (): void => {
-    const hash = window.location.hash
-    if (!hash.startsWith(FOCUS_HASH_PREFIX)) return
+  // ---- 2) 深链：本页从通知打开 → 聚焦 + 广播其它已开标签页 ----
+  const hash = window.location.hash
+  if (typeof hash === 'string' && hash.startsWith(FOCUS_HASH_PREFIX)) {
     const sessionId = decodeURIComponent(hash.slice(FOCUS_HASH_PREFIX.length))
     history.replaceState(null, '', window.location.pathname + window.location.search)
     if (sessionId.length > 0) {
       focusSession(sessionId, 'deep-link')
-      channel?.postMessage({ type: 'focus', sessionId })
+      fetch('/turn-notify/focus', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      }).catch(() => {}) // 广播失败不影响本页聚焦
     }
   }
 
-  // ---- 4) BroadcastChannel：多标签页同步 ----
-  const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('dsh-turn-notify') : undefined
-  let isLeader = true
-  if (channel !== undefined) {
-    channel.onmessage = (ev: MessageEvent) => {
-      const data = ev.data as { type?: string; sessionId?: string }
-      if (data.type === 'leader-claim') {
-        isLeader = false
-      } else if (data.type === 'focus' && typeof data.sessionId === 'string') {
-        if (isLeader) focusSession(data.sessionId, 'broadcast')
-      }
-    }
-    channel.postMessage({ type: 'leader-claim' })
-    ctx.effect(() => () => channel.close(), 'turn-notify-client: channel')
-  }
-
-  applyDeepLink()
-
-  // ---- 5) 稳定 title 标记 ----
-  document.title = (document.title || 'DSH') + ' — DSH'
-
-  log('loaded; leader=' + isLeader)
+  log('loaded; client=' + clientId)
 }

@@ -10,14 +10,19 @@
  *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
- * 点击通知卡片 → 回到对应会话（双路径复用，不重复开浏览器）：
- *   Web 客户端插件在页面打开期间持续 POST /turn-notify/presence 心跳
- *   （本插件经 webServer 服务注册该端点）。点击时心跳新鲜
- *   （< presenceTimeoutMs）= 页面已开 → 经转发事件 turn-notify/focus
- *   直接让已开页面切换会话，零浏览器启动；心跳过期 = 页面未开 →
- *   OS 深链打开（Linux notify-send -A → xdg-open / Windows toast
- *   protocol launch / macOS terminal-notifier -open），新开页面读
- *   hash 定位会话并开始心跳，后续点击即复用。
+ * 点击通知卡片 → 回到对应会话：
+ *   聚焦通道（本插件经 webServer 服务注册）：GET /turn-notify/focus-wait
+ *   长轮询（web 页面打开期间保持一个挂起请求，到达即记为页面在线
+ *   presence）+ POST /turn-notify/focus（深链落地页广播聚焦，让其它已开
+ *   标签页同步切换）。
+ *   Linux notify-send -A 把点击回调进宿主进程：页面在线 → 点击入队，
+ *   已开页面零浏览器启动直接切换；离线 → xdg-open 深链新开浏览器。
+ *   Windows toast protocol launch / macOS terminal-notifier -open 的点击
+ *   = 系统直接用浏览器打开深链 URL（无进程回调通道），浏览器已开时平台
+ *   行为是新开标签页——落地页读 hash 聚焦正确会话（带列表竞态重试）并
+ *   广播其它标签页同步切换。Windows toast 恒定 <audio silent="true"/>：
+ *   平台唯一音源是 sound 通道（SoundPlayer），否则系统默认音与其叠加
+ *   成双音效。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
@@ -57,14 +62,6 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "turn-notify";
 export declare const inject: never[];
-/** 点击通知：聚焦到会话（经转发事件送达已开的 Web 页面）。 */
-declare module '@deepseek-ai/cordis' {
-    interface Events {
-        'turn-notify/focus'(payload: {
-            sessionId: string;
-        }): void;
-    }
-}
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows';
 export interface Config {
     platform: PlatformChoice;
@@ -98,7 +95,11 @@ export interface Config {
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
-/** Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。 */
+/**
+ * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
+ * 恒定 <audio silent="true"/>：toast 自带默认系统音必须显式静音，平台
+ * 唯一音源是 sound 通道（SoundPlayer）——否则两声叠加成双音效。
+ */
 export declare function buildToastScript(title: string, body: string, launchUrl?: string): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export declare function buildMacNotifyScript(title: string, body: string): string;

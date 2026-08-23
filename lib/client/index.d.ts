@@ -1,21 +1,25 @@
 /**
- * dsh-turn-notify browser half：点击通知卡片 → 回到对应会话（复用优先）。
+ * dsh-turn-notify browser half：聚焦通道消费端。
  *
- * 双路径配合服务端：
- *   1. 心跳：页面打开期间定期 POST /turn-notify/presence（服务端插件注册
- *      的端点）。宿主点击通知时心跳新鲜 = 页面已开 → 经转发事件
- *      turn-notify/focus 直达本页（零浏览器启动、不重复开标签页）。
- *   2. 深链兜底：页面未开时宿主经 OS 深链新开（#dsh-focus=<sessionId>），
- *      本页读 hash 定位会话后清 hash，并开始心跳供后续点击复用。
- *   3. BroadcastChannel：深链页广播 focus → 已开标签页（leader）同步切换。
- *   4. document.title 稳定标记（"— DSH" 后缀）。
+ * 与服务端插件配套（经本包 webServer 路由）：
+ *   1. 长轮询 GET /turn-notify/focus-wait?client=<uuid>&since=<seq>：
+ *      页面打开期间持续保持一个挂起请求；点击通知 → 服务端入队 →
+ *      挂起请求立即返回 {entries:[{seq,sessionId}]} → 本页切换会话。
+ *      该轮询同时就是 presence：服务端据此判定“页面已开”，Linux 上
+ *      点击复用已开页面、零浏览器启动。
+ *   2. 深链兜底：页面未开时宿主经 OS 深链新开（#dsh-focus=<sessionId>，
+ *      Windows toast / macOS terminal-notifier 的点击即此路径），本页读
+ *      hash 聚焦会话，并 POST /turn-notify/focus 广播让其它已开标签页
+ *      同步切换。
+ *   3. 会话列表竞态重试：新开页面的会话列表异步晚到，open() 对未列出
+ *      会话直接抛错——聚焦带重试（250ms 间隔、至多 15s），列表到达
+ *      即成功；旧实现单次失败即吞掉，导致落地页停在恢复的旧会话上。
  *
  * @module dsh-turn-notify/client
  */
 /** 客户端上下文最小面（官方 runtime 的类型依赖未全发布，本地同款声明）。 */
 interface ClientContext {
     sessions: unknown;
-    remote: unknown;
     effect(fn: () => unknown, label?: string): void;
 }
 export declare const inject: string[];
