@@ -3,7 +3,8 @@ T=$(mktemp -d)
 cd $T
 git init -q -b main && git config user.email t@t && git config user.name t
 mkdir -p scripts
-cp /home/leo-tkp/Documents/code/mine/dsh-turn-notify/scripts/version.sh scripts/
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cp "$REPO_ROOT/scripts/version.sh" scripts/
 printf '{\n  "name": "t",\n  "version": "1.0.1"\n}\n' > package.json
 git add -A && git commit -qm init && git tag v1.0.1
 S=./scripts/version.sh
