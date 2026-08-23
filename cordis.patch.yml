@@ -1,0 +1,7 @@
+# dsh-turn-notify bundle patch：把插件行插入叠加本 bundle 的 profile。
+# 不带 config —— 全部走 Schema 默认值；要覆盖请用 profile 的
+# cordis.patch.yml 里 id: turn-notify 整行替换，或 ~/.dsh/settings.yaml
+# 顶层 turn-notify: 段（后者热生效）。
+- insert:
+    - id: turn-notify
+      name: 'dsh-turn-notify'
