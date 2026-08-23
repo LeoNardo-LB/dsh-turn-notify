@@ -2,8 +2,10 @@
  * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.2.0
  *
  * 两类通知：
- *   A 提问通知：真人提问进入会话时立即响（内容 = 会话标题 + 提问文本；
- *     steering 插话同样触发；goal 注入/合成上下文不触发）
+ *   A 提问通知（默认关，notifyOnQuestion 开启）：真人提问进入会话时
+ *     立即响（内容 = 会话标题 + 提问文本；steering 插话同样触发；
+ *     goal 注入/合成上下文不触发）。自己发的消息无需提醒，故默认关——
+ *     供远程发送、桌面确认送达的场景 opt-in
  *   B 轮次结束通知：只在 agent 真正停下来等用户输入时响（goal 自动
  *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
@@ -99,7 +101,7 @@ export const Config: Schema<Config> = Schema.object({
   command: Schema.string().default('').description('通知触发时的自定义命令，占位符 {sessionId} {title} {question}；留空关闭'),
   notifyCommand: Schema.string().default('').description('完全接管桌面通知的命令模板（高级；同上占位符）；留空用平台后端'),
   soundCommand: Schema.string().default('').description('完全接管提示音的命令模板（高级；同上占位符）；留空用平台后端'),
-  notifyOnQuestion: Schema.boolean().default(true).description('真人提问进入会话时也通知（提示音 + 桌面通知，内容 = 会话标题 + 提问；steering 插话同样触发，goal 注入/合成上下文不触发）'),
+  notifyOnQuestion: Schema.boolean().default(false).description('提问到达时也通知（默认关：自己刚发的消息无需提醒。适用场景：从远程设备发消息、在桌面确认送达。内容 = 会话标题 + 提问；steering 插话同样触发，goal 注入/合成上下文不触发）'),
   questionTitleTemplate: Schema.string().default('{title}').description('提问通知标题模板，占位符 {title} {question} {sessionId}'),
   questionBodyTemplate: Schema.string().default('提问：{question}').description('提问通知正文模板，占位符同上'),
   questionSoundFile: Schema.string().default('').description('提问提示音文件；留空 = 与轮次结束共用 soundFile / 平台默认'),

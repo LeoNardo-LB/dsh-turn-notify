@@ -23,18 +23,19 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 重启/resume 后的 active goal 一律 disarmed（不自动续跑），与 live 事件
 追踪的可见范围一致，无需回放 durable 日志。
 
-## 提问通知（v0.1.1+）
+## 提问通知（默认关）
 
 真人提问进入会话的瞬间也响一次（提示音 + 桌面通知），内容 = **会话标题
 + 提问文本**，与轮次结束通知通过 `questionBodyTemplate` 默认值
-（"提问：{question}"）区分。
+（"提问：{question}"）区分。**默认关闭**：自己刚发的消息无需提醒；
+适用场景是从远程设备发消息、想在桌面确认送达，需要时显式开启。
 
 - 只认真人输入（`source.kind === 'user'`）：steering 插话同样触发；
   goal 续跑注入（`'goal'`）、合成上下文（`'plugin'`）不触发。
 - 首轮提问时会话标题尚未生成（异步），退回 `fallbackTitle`；恢复的既有
   会话经服务折叠读出真实标题（v0.1.2+），第二次提问起展示真实标题。
 - 可用不同音效区分两种事件：`questionSoundFile` 指定提问专用提示音。
-- 关闭：`notifyOnQuestion: false`（只保留轮次结束通知）。
+- 开启（默认关）：`notifyOnQuestion: true`。
 
 ## 轮次结束通知内容（模板化）
 
