@@ -73,6 +73,8 @@ export interface Config {
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
+/** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
+export declare function buildMacNotifyScript(title: string, body: string): string;
 /** Windows toast 显示脚本（导出供测试在真实 PowerShell 下直接验证）。 */
 export declare function buildToastScript(title: string, body: string): string;
 /** Windows 提示音脚本（导出供测试验证）。 */

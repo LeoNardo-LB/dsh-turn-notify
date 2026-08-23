@@ -194,6 +194,11 @@ function appleString(s: string): string {
   return '"' + s.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"'
 }
 
+/** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
+export function buildMacNotifyScript(title: string, body: string): string {
+  return 'display notification ' + appleString(body) + ' with title ' + appleString(title)
+}
+
 /** XML 文本节点转义（Windows toast 模板用）。 */
 function xmlEscape(s: string): string {
   return s
@@ -266,8 +271,7 @@ export function apply(ctx: Context, config: Config) {
     if (platform === 'linux') {
       run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
     } else if (platform === 'macos') {
-      const script = 'display notification ' + appleString(body) + ' with title ' + appleString(title)
-      run('osascript', ['-e', script], (m) => warnOnce('osascript', m))
+      run('osascript', ['-e', buildMacNotifyScript(title, body)], (m) => warnOnce('osascript', m))
     } else if (platform === 'windows') {
       run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body))], (m) => warnOnce('windows-toast', m))
     } else {
