@@ -86,7 +86,8 @@ try {
   if (/ENOENT|not found/i.test(msg)) {
     console.log('SKIP: terminal-notifier 未安装（macOS 点击跳转需要它：brew install terminal-notifier）')
   } else {
-    assert.fail('terminal-notifier argv 被拒绝: ' + msg.slice(0, 200))
+    const detail = String(err.stderr ?? '') + ' ' + String(err.stdout ?? '') + ' | ' + msg
+    assert.fail('terminal-notifier argv 被拒绝: ' + detail.slice(0, 400))
   }
 }
 
