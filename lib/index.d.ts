@@ -46,14 +46,6 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "turn-notify";
 export declare const inject: never[];
-/** 点击通知卡片：请求（已开的）Web 页面聚焦到某会话（客户端插件订阅）。 */
-declare module '@deepseek-ai/cordis' {
-    interface Events {
-        'turn-notify/focus'(payload: {
-            sessionId: string;
-        }): void;
-    }
-}
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows';
 export interface Config {
     platform: PlatformChoice;

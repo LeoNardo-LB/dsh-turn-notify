@@ -1,29 +1,19 @@
 /**
  * dsh-turn-notify browser half：点击通知卡片 → 回到对应会话。
  *
- * 职责：
- *   1. 订阅宿主转发的 turn-notify/focus 事件（服务端插件在点击回调里
- *      emit；需先把事件名加进 dsh-api-remotes 的转发白名单，见
- *      scripts/patch-dsh-api-remotes.sh）→ sessions.open(sessionId)
- *      + window.focus()
- *   2. 冷启动深链：页面加载时读 location.hash（#dsh-focus=<sessionId>）
- *      定位会话后清 hash
- *   3. BroadcastChannel 协调：多个已开标签页时只有 leader 响应 focus
- *      事件（先开的 tab 是 leader；后开的收到 leader-claim 即让位）
- *   4. document.title 设稳定标记（服务端 xdotool 置前浏览器窗口时匹配用）
+ * 统一深链路径（服务端点击回调 = OS 用默认浏览器打开
+ * #dsh-focus=<sessionId>；浏览器自带置前/复用窗口行为）：
+ *   1. 本页从深链打开（hash 定位会话）→ sessions.open + 清 hash
+ *   2. BroadcastChannel：深链页广播 focus → 已开的其他标签页（leader）
+ *      同步切到同一会话，保持多标签页一致；后开者非 leader
+ *   3. document.title 稳定标记（"— DSH" 后缀）
  *
  * @module dsh-turn-notify/client
  */
-/** 客户端上下文最小面（官方 @deepseek-ai/dsh-client-runtime 的类型依赖未全部发布，本地声明同款形状）。 */
+/** 客户端上下文最小面（官方 runtime 的类型依赖未全发布，本地同款声明）。 */
 interface ClientContext {
   sessions: unknown
-  remote: unknown
   effect(fn: () => unknown, label?: string): void
-}
-
-/** 宿主转发事件的最小面（白名单 patch 后可用）。 */
-interface FocusRemote {
-  $on(event: 'turn-notify/focus', handler: (payload: { sessionId: string }) => void): () => void
 }
 
 /** sessions 服务最小面（完整契约在 dsh-client-runtime）。 */
@@ -31,7 +21,7 @@ interface SessionsLike {
   open(id: string): void
 }
 
-export const inject = ['remote', 'sessions']
+export const inject = ['sessions']
 
 /** 深链 hash 前缀（与服务端 deepLinkHash 配置一致）。 */
 export const FOCUS_HASH_PREFIX = '#dsh-focus='
@@ -40,9 +30,8 @@ export function apply(ctx: ClientContext): void {
   const log = (...a: unknown[]) => console.log('[turn-notify/client]', ...a)
 
   const sessions = ctx.sessions as SessionsLike
-  const remote = ctx.remote as unknown as FocusRemote
 
-  /** 定位到会话（容错：不在列表时 open 会 fail loud，捕获后仅记录）。 */
+  /** 定位到会话（不在列表时 open 会 fail loud，捕获后仅记录）。 */
   const focusSession = (sessionId: string, from: string): void => {
     try {
       sessions.open(sessionId)
@@ -53,45 +42,40 @@ export function apply(ctx: ClientContext): void {
     }
   }
 
-  // ---- 1) 宿主事件：点击通知 → 切会话 + 置前 ----
-  ctx.effect(() => {
-    const dispose = remote.$on('turn-notify/focus', ({ sessionId }) => {
-      focusSession(sessionId, 'host-event')
-    })
-    return dispose as unknown as () => void
-  }, 'turn-notify-client: focus subscription')
-
-  // ---- 2) 冷启动深链 ----
+  // ---- 1) 深链：本页从通知打开 ----
   const applyDeepLink = (): void => {
     const hash = window.location.hash
     if (!hash.startsWith(FOCUS_HASH_PREFIX)) return
     const sessionId = decodeURIComponent(hash.slice(FOCUS_HASH_PREFIX.length))
     history.replaceState(null, '', window.location.pathname + window.location.search)
-    if (sessionId.length > 0) focusSession(sessionId, 'deep-link')
+    if (sessionId.length > 0) {
+      focusSession(sessionId, 'deep-link')
+      // 通知其他已开标签页同步（多标签页一致）
+      channel?.postMessage({ type: 'focus', sessionId })
+    }
   }
-  applyDeepLink()
 
-  // ---- 3) BroadcastChannel 多标签页协调（leader 响应） ----
+  // ---- 2) BroadcastChannel：多标签页同步 ----
   const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('dsh-turn-notify') : undefined
   let isLeader = true
   if (channel !== undefined) {
     channel.onmessage = (ev: MessageEvent) => {
       const data = ev.data as { type?: string; sessionId?: string }
-      if (data.type === 'focus' && typeof data.sessionId === 'string') {
-        if (isLeader) focusSession(data.sessionId, 'broadcast')
-      } else if (data.type === 'leader-claim') {
+      if (data.type === 'leader-claim') {
         isLeader = false
+      } else if (data.type === 'focus' && typeof data.sessionId === 'string') {
+        // 深链页广播的 focus：已开标签页同步切换（leader 一个就够）
+        if (isLeader) focusSession(data.sessionId, 'broadcast')
       }
     }
-    // 声明 leadership（已开的其他 tab 收到后让位——但先开者已 claim 过，
-    // 后开者 claim 时没人再让它让位，由初始 true + 先到先得保证唯一 leader）
     channel.postMessage({ type: 'leader-claim' })
     ctx.effect(() => () => channel.close(), 'turn-notify-client: channel')
   }
 
-  // ---- 4) 稳定 title 标记（服务端 xdotool 置前用） ----
-  const base = document.title || 'DSH'
-  document.title = base + ' — DSH'
+  applyDeepLink()
+
+  // ---- 3) 稳定 title 标记 ----
+  document.title = (document.title || 'DSH') + ' — DSH'
 
   log('loaded; leader=' + isLeader)
 }
