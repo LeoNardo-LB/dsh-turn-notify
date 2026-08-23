@@ -119,6 +119,14 @@ afplay 真实播放系统音效）；Windows 至通知平台提交（headless Se
 止于 Show() 的 RPC 边界，有桌面会话即显示；XmlDocument WinRT 激活已按
 真内核 CI 发现修复）。
 
+## 版本与发版
+
+三阶段状态机：**开发版 `X.Y.Z-dev.n` → 测试版 `X.Y.Z-beta` → 正式版
+`X.Y.Z`**，递进必须走完全程（dev/beta 均为预览版；正式版与它的
+dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成，
+非法跳转直接报错；`--push` 一并推送提交与标签。完整规则与状态机图见
+[docs/VERSIONING.md](docs/VERSIONING.md)。
+
 ## 开发
 
 验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真，任意平台）、

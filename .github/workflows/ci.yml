@@ -16,6 +16,8 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm run build
       - run: pnpm test
+      - run: bash scripts/version.sh check
+      - run: bash tests/version-rules.sh
 
   windows-pwsh:
     runs-on: ubuntu-latest
