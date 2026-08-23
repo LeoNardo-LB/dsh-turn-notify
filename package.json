@@ -1,7 +1,7 @@
 {
   "name": "dsh-turn-notify",
   "description": "DSH bundle plugin: desktop notification (session title + first N chars of the user prompt) / sound / bell / custom command when the agent truly stops for user input (goal auto-continuation rounds stay silent). Cross-platform: Linux notify-send, macOS osascript, Windows toast.",
-  "version": "0.2.1",
+  "version": "0.2.2-dev.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
