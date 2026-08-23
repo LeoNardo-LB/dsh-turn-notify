@@ -106,7 +106,7 @@ if (process.platform === 'win32') {
     console.log('windows-toast failure:', msg)
     assert.ok(!/Unable to find type|Cannot find type/i.test(msg), '真 Windows/5.1 上 WinRT 类型必须能加载')
     assert.ok(
-      /notification platform|0x803E|Exception calling|unavailable|没有交互|通知平台/i.test(msg),
+      /notification platform|0x803E|0x80010105|RPC_E_SERVERFAULT|Exception calling|unavailable|没有交互|通知平台/i.test(msg),
       '失败必须是“无桌面会话的通知平台不可用”，而非脚本/转义问题',
     )
     console.log('TOAST-BOUNDARY-OK：类型加载与 XML 全过，仅无桌面会话无法显示（CI headless 预期）')

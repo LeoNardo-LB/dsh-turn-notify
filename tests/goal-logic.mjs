@@ -19,6 +19,9 @@ rmSync(OUT, { force: true })
 writeFileSync(OUT, '')
 
 const ctx = new Context()
+// 伪造宿主 sessionTitle 服务：模拟恢复会话的日志折叠读（构造种子里的标题
+// 不经 session/event 重播，只有服务折叠能读到）
+ctx.provide('sessionTitle', { get: (s) => (s.id === 'sim-session-2' ? { title: 'Folded:sim-session-2' } : undefined) })
 const config = {
   platform: 'linux',
   notifySend: false,
@@ -82,12 +85,25 @@ emitGoal('edit', { phase: 'active', activation: 'disarmed', roundsStarted: 2, ma
 emitStatus('idle')
 await sleep(100)
 
+console.log('--- F: 恢复会话标题读穿（服务折叠兜底）---')
+const agent2 = { session: { id: 'sim-session-2', header: {} } }
+const sess2 = agent2.session
+// 不发任何 session/title 事件（模拟恢复：标题只在历史种子里）
+ctx.emit('session/event', sess2, {
+  type: 'user/message',
+  data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二个会话提问' }] },
+})
+ctx.emit('agent/status', { agent: agent2, status: 'idle' })
+await sleep(100)
+
 const out = readFileSync(OUT, 'utf8').trim()
 const lines = out.split('\n').filter(Boolean)
 console.log('=== NOTIFY lines (' + lines.length + ') ===')
 for (const l of lines) console.log(l)
 console.log('=== 断言 ===')
-assert.equal(lines.length, 4, '恰好 4 次通知（A 提问1+完结1 + B 兜底1 + C 1）')
+assert.equal(lines.length, 6, '恰好 6 次通知（A 提问1+完结1 + B 兜底1 + C 1 + F 提问1+完结1）')
 assert.equal(lines[0], 'NOTIFY|Q|Goal 抑制测试|新问|请帮我调研 goal 通知的抑制行为，这是仿真提问|sim-session-1', 'E 提问通知内容（会话标题+提问）')
 assert.equal(lines[1], 'NOTIFY|[sim-session-1] Goal 抑制测试|问：请帮我调研 goal 通知的抑制行为，这是仿真提问|sim-session-1', 'A/D 轮次结束通知（模板渲染与内容）')
+assert.equal(lines[4], 'NOTIFY|Q|Folded:sim-session-2|新问|第二个会话提问|sim-session-2', 'F 提问通知标题来自服务折叠（恢复会话）')
+assert.equal(lines[5], 'NOTIFY|[sim-session-2] Folded:sim-session-2|问：第二个会话提问|sim-session-2', 'F 轮次结束通知标题来自服务折叠')
 console.log('ALL-PASS')

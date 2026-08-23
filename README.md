@@ -31,8 +31,8 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 
 - 只认真人输入（`source.kind === 'user'`）：steering 插话同样触发；
   goal 续跑注入（`'goal'`）、合成上下文（`'plugin'`）不触发。
-- 首轮提问时会话标题尚未生成（异步），退回 `fallbackTitle`；
-  第二次提问起展示真实标题。
+- 首轮提问时会话标题尚未生成（异步），退回 `fallbackTitle`；恢复的既有
+  会话经服务折叠读出真实标题（v0.1.2+），第二次提问起展示真实标题。
 - 可用不同音效区分两种事件：`questionSoundFile` 指定提问专用提示音。
 - 关闭：`notifyOnQuestion: false`（只保留轮次结束通知）。
 
@@ -40,7 +40,7 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 
 | 部位 | 默认 | 来源 |
 |---|---|---|
-| 标题 | `{title}` → 会话标题 | session/title latest-wins 快照；首轮可能未生成（标题异步生成），退回 fallbackTitle（默认 "DSH"） |
+| 标题 | `{title}` → 会话标题 | 三级解析：live `session/title` 追踪 → 宿主 `sessionTitle` 服务日志折叠（覆盖重启后恢复的既有会话——历史标题事件是构造种子、不经事件总线重播，只有折叠读得到）→ fallbackTitle。仅首轮新会话在标题异步生成前会落到 fallback |
 | 正文 | `{question}` → 本轮用户提问的前 questionChars 字（默认 80，超出加 …） | user/message；只统计真人输入（source.kind === 'user'）。goal 续跑注入消息 source.kind === 'goal'，不污染提问文本——goal 完结时的通知正文因此正确显示最初的人类请求 |
 | 正文兜底 | 未捕获到提问时显示 fallbackMessage | — |
 
@@ -132,8 +132,9 @@ pnpm test             # goal 判别逻辑仿真测试
 
 - 桌面通知/提示音失败（如无 DBUS、无声卡）只警告一次并静默降级。
 - 通道子进程 fire-and-forget（10s 超时），永不阻塞 agent loop。
-- 首轮回复时标题常未生成（异步），退回 fallbackTitle；第二轮起为真实标题。
-- 插件加载前已发生的事件不回放（live 追踪）——与 goal 判别语义一致
+- 首轮回复时标题常未生成（异步），退回 fallbackTitle；重启后恢复的既有
+  会话标题经 sessionTitle 服务折叠读出（v0.1.2+），不再是兜底值。
+- 提问文本为 live 追踪（不回放历史）；goal 判别不回放——与语义一致
   （重启后的 goal 一律 disarmed，本就该立即通知）。
 - goal/changed 不含 turn 结束原因；如需区分 completed/aborted/error
   要另听 session/event 的 turn/end。

@@ -121,6 +121,11 @@ const DEFAULT_SOUND: Record<Platform, string> = {
 /** Windows toast 借用的系统 PowerShell AUMID（保证通知中心可靠显示）。 */
 const POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 
+/** 宿主 sessionTitle 服务的最小读取面（可选服务，未挂载时 ctx.get 返回 undefined）。 */
+interface TitleServiceLike {
+  get(session: unknown): { title?: unknown } | undefined
+}
+
 /** 每个 session 的标题 + 最近一条真人提问。 */
 interface SessionInfo {
   title?: string
@@ -209,6 +214,7 @@ export function buildToastScript(title: string, body: string): string {
   const xml = '<toast><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
   return [
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
     '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
     "$xml.LoadXml(" + psSingle(xml) + ")",
     '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
@@ -299,6 +305,19 @@ export function apply(ctx: Context, config: Config) {
     return v
   }
 
+  /**
+   * 解析会话标题（三级回退）：live 追踪 → 宿主 sessionTitle 服务折叠 → undefined。
+   * 服务折叠覆盖 resume 场景：重启后既有会话的历史标题事件是构造种子，
+   * 不会经 session/event 重播（live 追踪看不到），但日志折叠读得到。
+   */
+  const resolveTitle = (session: unknown, sessionId: string): string | undefined => {
+    const live = info.get(sessionId)?.title
+    if (live !== undefined && live.length > 0) return live
+    const svc = (ctx as unknown as { get(name: string): unknown }).get('sessionTitle') as TitleServiceLike | undefined
+    const folded = svc?.get(session)?.title
+    return typeof folded === 'string' && folded.length > 0 ? folded : undefined
+  }
+
   /** 该会话的 goal 是否会自动续跑（live goal/changed 维护）。 */
   const goalWillContinue = new Map<string, boolean>()
   /** 兜底窗口中的定时器（续跑兜底：窗口耗尽仍未 running 则通知）。 */
@@ -315,7 +334,7 @@ export function apply(ctx: Context, config: Config) {
   // 会话事实追踪：标题快照（latest-wins）+ 最近一条真人提问。
   ctx.on('session/event', (session: { id: unknown; header?: { parentSession?: unknown } }, event: { type: string; data: unknown }) => {
     const sessionId = String(session.id)
-    if (event.type === 'session/title') {
+    if (event.type === 'session/title') { // live 快路径；resume 场景由 resolveTitle 的服务折叠兜底
       const data = event.data as { title?: unknown }
       if (typeof data.title === 'string' && data.title.length > 0) {
         getInfo(sessionId).title = data.title
@@ -331,8 +350,7 @@ export function apply(ctx: Context, config: Config) {
       // 注入上下文（kind 'plugin'）已被上面的 source 过滤排除。
       if (!config.notifyOnQuestion) return
       if (config.rootOnly && session.header?.parentSession !== undefined) return
-      const s = getInfo(sessionId)
-      const rawTitle = s.title !== undefined && s.title.length > 0 ? s.title : config.fallbackTitle
+      const rawTitle = resolveTitle(session, sessionId) ?? config.fallbackTitle
       const rawBody = config.questionChars > 0 ? truncate(q, config.questionChars) : config.fallbackMessage
       const vars = { title: rawTitle, question: rawBody, sessionId }
       const title = render(config.questionTitleTemplate, vars)
@@ -390,7 +408,7 @@ export function apply(ctx: Context, config: Config) {
       // 否则定时器到点会再 fire 一次（双通知）。
       cancelQuiet(sessionId)
       const s = info.get(sessionId)
-      const rawTitle = s?.title !== undefined && s.title.length > 0 ? s.title : config.fallbackTitle
+      const rawTitle = resolveTitle(session, sessionId) ?? config.fallbackTitle
       const rawBody =
         config.questionChars > 0 && s?.question !== undefined && s.question.length > 0
           ? truncate(s.question, config.questionChars)
