@@ -76,4 +76,18 @@ if (scode !== 0) {
   console.log('AFPLAY-EXEC-OK')
 }
 
+// ---- 4) terminal-notifier 冒烟（点击跳转的 macOS 通道；未安装则 SKIP） ----
+console.log('--- 4) terminal-notifier 点击通道 ----')
+try {
+  execFileSync('terminal-notifier', ['-title', 'dsh-turn-notify CI', '-message', 'terminal-notifier argv 验证', '-open', 'http://127.0.0.1:3080/#dsh-focus=ci-test', '-group', 'dsh-tn-ci'], { timeout: 15000 })
+  console.log('TN-EXEC-OK：terminal-notifier 接受完整 argv（-open 深链已注册）')
+} catch (err) {
+  const msg = String(err.message ?? err)
+  if (/ENOENT|not found/i.test(msg)) {
+    console.log('SKIP: terminal-notifier 未安装（macOS 点击跳转需要它：brew install terminal-notifier）')
+  } else {
+    assert.fail('terminal-notifier argv 被拒绝: ' + msg.slice(0, 200))
+  }
+}
+
 console.log('ALL-PASS')

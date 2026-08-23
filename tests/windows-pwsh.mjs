@@ -58,6 +58,14 @@ console.log(out1)
 assert.ok(out1.includes('PARSE-OK'), '正常字符串语法零错误')
 assert.ok(out1.includes('ROUNDTRIP-OK'), '中日文/引号/反斜杠/emoji 编码往返无损')
 
+// 点击跳转：protocol-launch toast 的 XML 断言（解码 -EncodedCommand 检查）
+const launchUrl = 'http://127.0.0.1:3080/#dsh-focus=session-click-test'
+const decodedClick = Buffer.from(encodePs(buildToastScript('T', 'B', launchUrl)), 'base64').toString('utf16le')
+assert.ok(decodedClick.includes('activationType="protocol"'), 'toast XML 应含 protocol 激活类型')
+assert.ok(decodedClick.includes('launch="' + launchUrl + '"'), 'toast XML 应含深链 launch 属性')
+const decodedPlain = Buffer.from(encodePs(buildToastScript('T', 'B')), 'base64').toString('utf16le')
+assert.ok(!decodedPlain.includes('activationType'), '无深链时不应有激活属性')
+
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)
 console.log(out2.split('\n')[0])

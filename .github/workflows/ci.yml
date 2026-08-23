@@ -62,6 +62,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: brew install terminal-notifier
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm run build
       - run: node tests/macos-notify.mjs
