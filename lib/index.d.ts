@@ -73,4 +73,10 @@ export interface Config {
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
+/** Windows toast 显示脚本（导出供测试在真实 PowerShell 下直接验证）。 */
+export declare function buildToastScript(title: string, body: string): string;
+/** Windows 提示音脚本（导出供测试验证）。 */
+export declare function buildSoundScript(file: string): string;
+/** -EncodedCommand 编码（UTF-16LE base64）。 */
+export declare function encodePs(script: string): string;
 export declare function apply(ctx: Context, config: Config): void;

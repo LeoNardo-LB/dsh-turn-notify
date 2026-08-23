@@ -204,6 +204,28 @@ function psSingle(s: string): string {
   return "'" + s.replaceAll("'", "''") + "'"
 }
 
+/** Windows toast 显示脚本（导出供测试在真实 PowerShell 下直接验证）。 */
+export function buildToastScript(title: string, body: string): string {
+  const xml = '<toast><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
+  return [
+    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+    '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
+    "$xml.LoadXml(" + psSingle(xml) + ")",
+    '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "').Show($toast)",
+  ].join('\n')
+}
+
+/** Windows 提示音脚本（导出供测试验证）。 */
+export function buildSoundScript(file: string): string {
+  return '(New-Object Media.SoundPlayer ' + psSingle(file) + ').PlaySync()'
+}
+
+/** -EncodedCommand 编码（UTF-16LE base64）。 */
+export function encodePs(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
 function detectPlatform(choice: PlatformChoice): Platform | undefined {
   if (choice === 'linux' || choice === 'macos' || choice === 'windows') return choice
   if (process.platform === 'linux') return 'linux'
@@ -241,16 +263,7 @@ export function apply(ctx: Context, config: Config) {
       const script = 'display notification ' + appleString(body) + ' with title ' + appleString(title)
       run('osascript', ['-e', script], (m) => warnOnce('osascript', m))
     } else if (platform === 'windows') {
-      const xml = '<toast><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual></toast>'
-      const script = [
-        '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
-        '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
-        "$xml.LoadXml(" + psSingle(xml) + ")",
-        '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "').Show($toast)",
-      ].join('\n')
-      const encoded = Buffer.from(script, 'utf16le').toString('base64')
-      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], (m) => warnOnce('windows-toast', m))
+      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body))], (m) => warnOnce('windows-toast', m))
     } else {
       warnOnce('platform', '未知平台（process.platform=' + process.platform + '），只有 bell/command 通道可用')
     }
@@ -272,9 +285,7 @@ export function apply(ctx: Context, config: Config) {
     } else if (platform === 'macos') {
       run('afplay', [file], (m) => warnOnce('afplay', m))
     } else if (platform === 'windows') {
-      const script = '(New-Object Media.SoundPlayer ' + psSingle(file) + ').PlaySync()'
-      const encoded = Buffer.from(script, 'utf16le').toString('base64')
-      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], (m) => warnOnce('windows-sound', m))
+      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildSoundScript(file))], (m) => warnOnce('windows-sound', m))
     }
   }
 
