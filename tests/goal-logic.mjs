@@ -5,6 +5,7 @@
 //   C disarmed（resume 后）→ 立即通知
 //   D 模板渲染（titleTemplate/bodyTemplate 占位符）
 //   E 提问通知（v0.1.1）：真人提问进入会话即通知（会话标题+提问）
+//   G 子代理（parentSession 有值）不触发任何通知（rootOnly 回归锁）
 // 运行：先 pnpm run build，再 node tests/goal-logic.mjs（无需实验 flag）
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
@@ -84,6 +85,21 @@ console.log('--- C: disarmed（resume 后）→ 立即通知 ---')
 emitGoal('edit', { phase: 'active', activation: 'disarmed', roundsStarted: 2, maxGoalRounds: 3 })
 emitStatus('idle')
 await sleep(100)
+
+console.log('--- G: 子代理不通知（rootOnly）---')
+const beforeG = readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean).length
+const childAgent = { session: { id: 'sim-child-1', header: { parentSession: 'sim-session-1' } } }
+// 子会话里的用户消息（理论上不会有，防御性验证）与 idle 都不得产生通知
+ctx.emit('session/event', childAgent.session, {
+  type: 'user/message',
+  data: { source: { kind: 'user' }, content: [{ type: 'text', text: '子代理内部消息' }] },
+})
+ctx.emit('agent/status', { agent: childAgent, status: 'running' })
+ctx.emit('agent/status', { agent: childAgent, status: 'idle' })
+await sleep(100)
+const afterG = readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean).length
+assert.equal(afterG, beforeG, '子代理的轮次结束与提问都不得触发通知')
+console.log('SUBAGENT-FILTERED-OK（通知数不变：' + beforeG + ' → ' + afterG + '）')
 
 console.log('--- F: 恢复会话标题读穿（服务折叠兜底）---')
 const agent2 = { session: { id: 'sim-session-2', header: {} } }
