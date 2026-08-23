@@ -129,6 +129,15 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
 
 ## 开发
 
+点击跳转的真机校验工具（CI 无法覆盖最后一环——runner 无桌面通知环境）：
+
+- **macOS**：`node tests/macos-click.mjs` —— 自动发带 `-open` 深链的 terminal-notifier 通知，
+  用辅助功能 API 自动点击卡片，本地监听器接住深链请求即 PASS（前置：brew 装
+  terminal-notifier + 终端获得辅助功能授权；也可 10 秒内手动点）。
+- **Windows**：`node tests/windows-click.mjs [--auto]` —— 投递与插件同源的
+  protocol-launch toast，点击（默认人工，`--auto` 尝试 UIA 自动点击会动鼠标）后
+  默认浏览器打开深链，监听器收到即 PASS。
+
 验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真，任意平台）、
 `node tests/windows-pwsh.mjs [powershell/pwsh]`（Windows 路径）、
 `node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
