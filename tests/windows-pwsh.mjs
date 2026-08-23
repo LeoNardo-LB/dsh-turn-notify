@@ -65,7 +65,9 @@ async function triggerPlugin(title, question) {
   const ctx = new Context()
   ctx.plugin(plugin, {
     platform: 'windows', notifySend: true, sound: false, bell: false, command: '',
-    notifyCommand: '', soundCommand: '', appName: 'dsh', expireMs: 4000,
+    notifyCommand: '', soundCommand: '', notifyOnQuestion: false,
+    questionTitleTemplate: '{title}', questionBodyTemplate: '提问：{question}', questionSoundFile: '',
+    appName: 'dsh', expireMs: 4000,
     titleTemplate: '{title}', bodyTemplate: '{question}', rootOnly: true,
     skipGoalRounds: true, goalQuietMs: 3000, fallbackTitle: 'DSH', fallbackMessage: '回复结束',
     questionChars: 200, minRunMs: 0,

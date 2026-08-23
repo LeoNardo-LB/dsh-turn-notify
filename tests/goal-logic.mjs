@@ -4,6 +4,7 @@
 //   B 兜底——看似续跑但没人来，窗口耗尽后照常通知
 //   C disarmed（resume 后）→ 立即通知
 //   D 模板渲染（titleTemplate/bodyTemplate 占位符）
+//   E 提问通知（v0.1.1）：真人提问进入会话即通知（会话标题+提问）
 // 运行：先 pnpm run build，再 node tests/goal-logic.mjs（无需实验 flag）
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
@@ -26,6 +27,10 @@ const config = {
   command: 'echo "NOTIFY|{title}|{question}|{sessionId}" >> ' + OUT,
   notifyCommand: '',
   soundCommand: '',
+  notifyOnQuestion: true,
+  questionTitleTemplate: 'Q|{title}',
+  questionBodyTemplate: '新问|{question}',
+  questionSoundFile: '',
   appName: 'dsh',
   expireMs: 4000,
   titleTemplate: '[{sessionId}] {title}',
@@ -51,8 +56,10 @@ const emitUser = (text) => ctx.emit('session/event', sess, {
 })
 
 console.log('--- A: goal 续跑抑制 + 完结即响 ---')
-emitUser('请帮我调研 goal 通知的抑制行为，这是仿真提问')
+// 标题先于提问到达（验证提问通知能展示会话标题；首轮真实场景
+// 里标题常在提问后才生成，那时走 fallbackTitle——由 B/C 段覆盖）
 ctx.emit('session/event', sess, { type: 'session/title', data: { title: 'Goal 抑制测试' } })
+emitUser('请帮我调研 goal 通知的抑制行为，这是仿真提问')
 emitGoal('create', { phase: 'active', activation: 'armed', roundsStarted: 0, maxGoalRounds: 3 })
 emitStatus('running')
 emitStatus('idle')            // → 应回静默窗口，无 NOTIFY
@@ -80,6 +87,7 @@ const lines = out.split('\n').filter(Boolean)
 console.log('=== NOTIFY lines (' + lines.length + ') ===')
 for (const l of lines) console.log(l)
 console.log('=== 断言 ===')
-assert.equal(lines.length, 3, '恰好 3 次通知（A 一次 + B 兜底一次 + C 一次）')
-assert.equal(lines[0], 'NOTIFY|[sim-session-1] Goal 抑制测试|问：请帮我调研 goal 通知的抑制行为，这是仿真提问|sim-session-1', 'A/D 模板渲染与内容')
+assert.equal(lines.length, 4, '恰好 4 次通知（A 提问1+完结1 + B 兜底1 + C 1）')
+assert.equal(lines[0], 'NOTIFY|Q|Goal 抑制测试|新问|请帮我调研 goal 通知的抑制行为，这是仿真提问|sim-session-1', 'E 提问通知内容（会话标题+提问）')
+assert.equal(lines[1], 'NOTIFY|[sim-session-1] Goal 抑制测试|问：请帮我调研 goal 通知的抑制行为，这是仿真提问|sim-session-1', 'A/D 轮次结束通知（模板渲染与内容）')
 console.log('ALL-PASS')

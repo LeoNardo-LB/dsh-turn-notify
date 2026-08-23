@@ -1,7 +1,11 @@
 /**
- * dsh-turn-notify — 轮次结束通知插件（DSH bundle）· v0.1.0
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.1.1
  *
- * 只在 agent 真正停下来等用户输入时通知（goal 自动续跑轮静默），
+ * 两类通知：
+ *   A 提问通知：真人提问进入会话时立即响（内容 = 会话标题 + 提问文本；
+ *     steering 插话同样触发；goal 注入/合成上下文不触发）
+ *   B 轮次结束通知：只在 agent 真正停下来等用户输入时响（goal 自动
+ *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
@@ -59,6 +63,10 @@ export interface Config {
   command: string
   notifyCommand: string
   soundCommand: string
+  notifyOnQuestion: boolean
+  questionTitleTemplate: string
+  questionBodyTemplate: string
+  questionSoundFile: string
   appName: string
   expireMs: number
   titleTemplate: string
@@ -86,6 +94,10 @@ export const Config: Schema<Config> = Schema.object({
   command: Schema.string().default('').description('通知触发时的自定义命令，占位符 {sessionId} {title} {question}；留空关闭'),
   notifyCommand: Schema.string().default('').description('完全接管桌面通知的命令模板（高级；同上占位符）；留空用平台后端'),
   soundCommand: Schema.string().default('').description('完全接管提示音的命令模板（高级；同上占位符）；留空用平台后端'),
+  notifyOnQuestion: Schema.boolean().default(true).description('真人提问进入会话时也通知（提示音 + 桌面通知，内容 = 会话标题 + 提问；steering 插话同样触发，goal 注入/合成上下文不触发）'),
+  questionTitleTemplate: Schema.string().default('{title}').description('提问通知标题模板，占位符 {title} {question} {sessionId}'),
+  questionBodyTemplate: Schema.string().default('提问：{question}').description('提问通知正文模板，占位符同上'),
+  questionSoundFile: Schema.string().default('').description('提问提示音文件；留空 = 与轮次结束共用 soundFile / 平台默认'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -245,12 +257,12 @@ export function apply(ctx: Context, config: Config) {
   }
 
   /** fire-and-forget 提示音（按平台分发；soundCommand 可完全接管）。 */
-  const sendSound = (vars: { title: string; question: string; sessionId: string }): void => {
+  const sendSound = (vars: { title: string; question: string; sessionId: string }, fileOverride = ''): void => {
     if (config.soundCommand) {
       runShellCommand(platform, render(config.soundCommand, vars), (m) => warnOnce('sound-command', m))
       return
     }
-    const file = config.soundFile !== '' ? config.soundFile : platform !== undefined ? DEFAULT_SOUND[platform] : ''
+    const file = fileOverride !== '' ? fileOverride : config.soundFile !== '' ? config.soundFile : platform !== undefined ? DEFAULT_SOUND[platform] : ''
     if (file === '' || !existsSync(file)) {
       warnOnce('sound', '提示音文件不存在: ' + (file === '' ? '(无平台默认)' : file))
       return
@@ -290,7 +302,7 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // 会话事实追踪：标题快照（latest-wins）+ 最近一条真人提问。
-  ctx.on('session/event', (session: { id: unknown }, event: { type: string; data: unknown }) => {
+  ctx.on('session/event', (session: { id: unknown; header?: { parentSession?: unknown } }, event: { type: string; data: unknown }) => {
     const sessionId = String(session.id)
     if (event.type === 'session/title') {
       const data = event.data as { title?: unknown }
@@ -301,7 +313,25 @@ export function apply(ctx: Context, config: Config) {
       const data = event.data as { source?: { kind?: unknown }; content?: unknown }
       if (data === null || data.source?.kind !== 'user') return
       const q = extractText(data.content)
-      if (q.length > 0) getInfo(sessionId).question = q
+      if (q.length === 0) return
+      getInfo(sessionId).question = q
+      // 提问通知（v0.1.1）：真人提问进入会话时立即提示——内容 = 会话标题
+      // + 提问文本。steering 插话同样触发；goal 续跑（kind 'goal'）与
+      // 注入上下文（kind 'plugin'）已被上面的 source 过滤排除。
+      if (!config.notifyOnQuestion) return
+      if (config.rootOnly && session.header?.parentSession !== undefined) return
+      const s = getInfo(sessionId)
+      const rawTitle = s.title !== undefined && s.title.length > 0 ? s.title : config.fallbackTitle
+      const rawBody = config.questionChars > 0 ? truncate(q, config.questionChars) : config.fallbackMessage
+      const vars = { title: rawTitle, question: rawBody, sessionId }
+      const title = render(config.questionTitleTemplate, vars)
+      const body = render(config.questionBodyTemplate, vars)
+      const finalVars = { title, question: body, sessionId }
+      log('user question → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId)
+      if (config.notifySend) sendDesktop(title, body, finalVars)
+      if (config.sound) sendSound(finalVars, config.questionSoundFile)
+      if (config.bell) process.stdout.write('\x07')
+      if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
     }
   })
 
@@ -383,7 +413,7 @@ export function apply(ctx: Context, config: Config) {
     notify()
   })
 
-  log('loaded; v0.1.0 platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
+  log('loaded; v0.1.1 platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
     notifySend: config.notifySend, sound: config.sound, bell: config.bell,
     command: config.command ? '(custom)' : '(off)', rootOnly: config.rootOnly,
     questionChars: config.questionChars, skipGoalRounds: config.skipGoalRounds,

@@ -1,7 +1,7 @@
 # dsh-turn-notify
 
-DSH bundle 插件：**agent 真正停下等用户输入时发出通知**。
-弥补 dsh 0.1.1-rc.2 没有任何原生 turn 结束提示通道的问题。
+DSH bundle 插件：**提问到达时 + agent 真正停下等用户输入时发出通知**。
+弥补 dsh 0.1.1-rc.2 没有任何原生 turn 提示通道的问题。
 
 跨平台：**Linux**（notify-send + paplay）/ **macOS**（osascript + afplay）/
 **Windows**（PowerShell WinRT Toast + SoundPlayer）。
@@ -23,7 +23,20 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 重启/resume 后的 active goal 一律 disarmed（不自动续跑），与 live 事件
 追踪的可见范围一致，无需回放 durable 日志。
 
-## 通知内容（模板化）
+## 提问通知（v0.1.1+）
+
+真人提问进入会话的瞬间也响一次（提示音 + 桌面通知），内容 = **会话标题
++ 提问文本**，与轮次结束通知通过 `questionBodyTemplate` 默认值
+（"提问：{question}"）区分。
+
+- 只认真人输入（`source.kind === 'user'`）：steering 插话同样触发；
+  goal 续跑注入（`'goal'`）、合成上下文（`'plugin'`）不触发。
+- 首轮提问时会话标题尚未生成（异步），退回 `fallbackTitle`；
+  第二次提问起展示真实标题。
+- 可用不同音效区分两种事件：`questionSoundFile` 指定提问专用提示音。
+- 关闭：`notifyOnQuestion: false`（只保留轮次结束通知）。
+
+## 轮次结束通知内容（模板化）
 
 | 部位 | 默认 | 来源 |
 |---|---|---|
@@ -50,6 +63,9 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 - `expireMs`（默认 4000）：linux 通知超时；macos/win 不支持则忽略。
 - `soundFile`：留空 = 平台默认（linux freedesktop bell.oga /
   macos Glass.aiff / windows Windows Notify.wav）。
+- `notifyOnQuestion`（默认开）+ `questionTitleTemplate` /
+  `questionBodyTemplate` / `questionSoundFile`：提问通知开关与
+  内容/音效（见上节）。
 
 Windows 实现注记：通知脚本经 PowerShell `-EncodedCommand`
 （UTF-16LE base64）投递，规避引号转义问题，零第三方依赖；

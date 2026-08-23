@@ -1,7 +1,11 @@
 /**
- * dsh-turn-notify — 轮次结束通知插件（DSH bundle）· v0.1.0
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.1.1
  *
- * 只在 agent 真正停下来等用户输入时通知（goal 自动续跑轮静默），
+ * 两类通知：
+ *   A 提问通知：真人提问进入会话时立即响（内容 = 会话标题 + 提问文本；
+ *     steering 插话同样触发；goal 注入/合成上下文不触发）
+ *   B 轮次结束通知：只在 agent 真正停下来等用户输入时响（goal 自动
+ *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
@@ -52,6 +56,10 @@ export interface Config {
     command: string;
     notifyCommand: string;
     soundCommand: string;
+    notifyOnQuestion: boolean;
+    questionTitleTemplate: string;
+    questionBodyTemplate: string;
+    questionSoundFile: string;
     appName: string;
     expireMs: number;
     titleTemplate: string;
