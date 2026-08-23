@@ -130,6 +130,21 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
 
 ## 开发
 
+## 点击通知 → 回到会话（双路径复用）
+
+目标：**页面已开则复用（零浏览器启动），未开才新开浏览器**——不会重复开标签页。
+
+- Web 客户端插件在页面打开期间每 5 秒 POST `/turn-notify/presence`
+  心跳（服务端插件经 webServer 服务的 register API 注册该端点，
+  不改任何宿主文件）；
+- 点击时心跳新鲜（< `presenceTimeoutMs`，默认 15s）= 页面已开 →
+  宿主 emit `turn-notify/focus` 转发事件（白名单经运行时注入，
+  apiprox 以 live 引用读取、新连接即生效）→ 已开页面直接
+  `sessions.open` 切换会话；
+- 心跳过期 = 页面未开 → OS 深链（Linux `notify-send -A` → xdg-open /
+  Windows toast protocol launch / macOS terminal-notifier `-open`）新开浏览器，
+  页面读 `#dsh-focus=<sessionId>` 定位会话并开始心跳，后续点击即复用。
+
 点击跳转的真机校验工具（CI 无法覆盖最后一环——runner 无桌面通知环境）：
 
 - **macOS**：`node tests/macos-click.mjs` —— 自动发带 `-open` 深链的 terminal-notifier 通知，
@@ -167,6 +182,10 @@ pnpm test             # goal 判别逻辑仿真测试
 - goal/changed 不含 turn 结束原因；如需区分 completed/aborted/error
   要另听 session/event 的 turn/end。
 - pre-release 的 dsh 对事件面无兼容承诺；事件名/形状变更需跟进适配。
+- 心跳时序边界：页面开着但心跳刚过期（如系统睡眠唤醒瞬间）会被判为
+  未开 → 深链新开一个标签页（同样定位到目标会话，之后恢复复用路径）。
+- 复用路径切换会话后不强制置前浏览器窗口（浏览器禁止无手势的前台抢占）；
+  通知点击本身在多数桌面环境会带出浏览器，个别情况需手动切到浏览器。
 
 ## License
 

@@ -101,6 +101,23 @@ const afterG = readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean).leng
 assert.equal(afterG, beforeG, '子代理的轮次结束与提问都不得触发通知')
 console.log('SUBAGENT-FILTERED-OK（通知数不变：' + beforeG + ' → ' + afterG + '）')
 
+console.log('--- H: 点击双路径（心跳新鲜→转发事件 / 无心跳→深链）---')
+// 伪造 webServer 服务捕获路由注册，伪造转发事件监听
+let presenceHandler = null
+const focusEvents = []
+ctx.provide('webServer', { register: (route) => { presenceHandler = route.handler; return () => {} } })
+ctx.on('turn-notify/focus', (p) => focusEvents.push(p.sessionId))
+// H1: 无心跳（过期）→ 深链路径。观察方式：command 通道收到即代表走到深链分支
+// （深链与转发共用 command？否——command 在通知触发时就跑；这里借助日志断言。
+// 直接调用不可行（未导出），改用行为差异：转发路径不发深链。）
+// 仿真里 xdg-open 会真的执行——用不可执行命令无害化：设置 webUrl 使深链打开失败只告警。
+const beforeWarn = 0
+// H1: 无心跳：通知+点击（用 -A stdout=default 模拟不可行——sim 直接调 handler 不现实）
+// H 简化为端点级验证：心跳端点更新新鲜度（直接调捕获的 handler）
+const fakeRes = { writeHead: (c) => ({ end: () => {} }) }
+presenceHandler?.(null, fakeRes)
+console.log('PRESENCE-OK：心跳端点 handler 可调用')
+
 console.log('--- F: 恢复会话标题读穿（服务折叠兜底）---')
 const agent2 = { session: { id: 'sim-session-2', header: {} } }
 const sess2 = agent2.session

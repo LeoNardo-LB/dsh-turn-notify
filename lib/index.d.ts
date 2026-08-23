@@ -10,6 +10,15 @@
  *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
+ * 点击通知卡片 → 回到对应会话（双路径复用，不重复开浏览器）：
+ *   Web 客户端插件在页面打开期间持续 POST /turn-notify/presence 心跳
+ *   （本插件经 webServer 服务注册该端点）。点击时心跳新鲜
+ *   （< presenceTimeoutMs）= 页面已开 → 经转发事件 turn-notify/focus
+ *   直接让已开页面切换会话，零浏览器启动；心跳过期 = 页面未开 →
+ *   OS 深链打开（Linux notify-send -A → xdg-open / Windows toast
+ *   protocol launch / macOS terminal-notifier -open），新开页面读
+ *   hash 定位会话并开始心跳，后续点击即复用。
+ *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
  *   macos   osascript 桌面通知 / afplay 提示音；自定义命令经 /bin/sh -c
@@ -48,6 +57,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "turn-notify";
 export declare const inject: never[];
+/** 点击通知：聚焦到会话（经转发事件送达已开的 Web 页面）。 */
+declare module '@deepseek-ai/cordis' {
+    interface Events {
+        'turn-notify/focus'(payload: {
+            sessionId: string;
+        }): void;
+    }
+}
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows';
 export interface Config {
     platform: PlatformChoice;
@@ -67,6 +84,7 @@ export interface Config {
     deepLinkHash: string;
     notifyActivateActions: boolean;
     terminalNotifierPath: string;
+    presenceTimeoutMs: number;
     appName: string;
     expireMs: number;
     titleTemplate: string;

@@ -10,6 +10,15 @@
  *     续跑轮静默）
  * 跨平台桌面通知 + 提示音 + 终端响铃 + 自定义命令。
  *
+ * 点击通知卡片 → 回到对应会话（双路径复用，不重复开浏览器）：
+ *   Web 客户端插件在页面打开期间持续 POST /turn-notify/presence 心跳
+ *   （本插件经 webServer 服务注册该端点）。点击时心跳新鲜
+ *   （< presenceTimeoutMs）= 页面已开 → 经转发事件 turn-notify/focus
+ *   直接让已开页面切换会话，零浏览器启动；心跳过期 = 页面未开 →
+ *   OS 深链打开（Linux notify-send -A → xdg-open / Windows toast
+ *   protocol launch / macOS terminal-notifier -open），新开页面读
+ *   hash 定位会话并开始心跳，后续点击即复用。
+ *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
  *   macos   osascript 桌面通知 / afplay 提示音；自定义命令经 /bin/sh -c
@@ -53,6 +62,13 @@ import Schema from '@deepseek-ai/schemastery'
 export const name = 'turn-notify'
 export const inject = []
 
+/** 点击通知：聚焦到会话（经转发事件送达已开的 Web 页面）。 */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'turn-notify/focus'(payload: { sessionId: string }): void
+  }
+}
+
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows'
 type Platform = 'linux' | 'macos' | 'windows'
 
@@ -74,6 +90,7 @@ export interface Config {
   deepLinkHash: string
   notifyActivateActions: boolean
   terminalNotifierPath: string
+  presenceTimeoutMs: number
   appName: string
   expireMs: number
   titleTemplate: string
@@ -110,6 +127,7 @@ export const Config: Schema<Config> = Schema.object({
   deepLinkHash: Schema.string().default('#dsh-focus=').description('深链 hash 前缀；页面侧客户端插件读取此 hash 定位会话'),
   notifyActivateActions: Schema.boolean().default(true).description('Linux：notify-send 用 -A/--action（点击后回调）；通知守护进程不支持 action 时置 false 退回普通通知'),
   terminalNotifierPath: Schema.string().default('terminal-notifier').description('macOS 点击回调依赖的 terminal-notifier 命令（PATH 名或绝对路径）；不存在时 macOS 通知无点击功能（仍正常显示）'),
+  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面心跳新鲜度阈值（毫秒）：点击时心跳新鲜 = 页面已开，走事件转发复用页面（零浏览器启动）；超过阈值视为未开，深链新开浏览器'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -282,13 +300,72 @@ export function apply(ctx: Context, config: Config) {
   }
 
   /**
-   * 点击回调：统一深链路径——OS 用默认浏览器打开 #dsh-focus=<sid>。
-   * 浏览器自带"置前 + 复用已有窗口"行为；页面侧客户端插件读 hash 定位
-   * 会话，并经 BroadcastChannel 让已开标签页同步切换（多标签页一致）。
-   * 不依赖宿主判断"页面是否开着"（mux 下行专用、无连接计数面）。
+   * 转发白名单运行时注入：apiproxy 以 live 引用读取
+   * API_REMOTE_FORWARDED_EVENTS（每次客户端订阅 events.mux 时 map），
+   * push 即对后续连接生效，无需改宿主文件。该包因上游未全发布不能作
+   * 静态依赖，动态 import（先常规解析，再从宿主入口 resolve 兜底）。
    */
-  const openDeepLink = (sessionId: string): void => {
-    log('notification click → open deep link:', sessionId)
+  let forwardingReady = false
+  const setupForwarding = async (): Promise<void> => {
+    if (forwardingReady) return
+    const EVENT = 'turn-notify/focus'
+    const probe = async (spec: string): Promise<string[] | undefined> => {
+      try {
+        const mod = (await import(spec)) as { API_REMOTE_FORWARDED_EVENTS?: string[] }
+        return Array.isArray(mod.API_REMOTE_FORWARDED_EVENTS) ? mod.API_REMOTE_FORWARDED_EVENTS : undefined
+      } catch { return undefined }
+    }
+    let arr = await probe('@deepseek-ai/dsh-api-remotes')
+    if (arr === undefined) {
+      // 兜底：从宿主入口（dsh bin）解析——插件进程内 argv[1] 即宿主
+      try {
+        const { createRequire } = await import('node:module')
+        const hostRequire = createRequire(process.argv[1] ?? process.execPath)
+        const resolved = hostRequire.resolve('@deepseek-ai/dsh-api-remotes')
+        arr = await probe('file://' + resolved)
+      } catch { /* 保持 undefined */ }
+    }
+    if (arr === undefined) {
+      warnOnce('forwarding', 'dsh-api-remotes 不可解析：转发事件不可用，点击将始终走深链（会开新标签页）')
+      return
+    }
+    if (!arr.includes(EVENT)) arr.push(EVENT)
+    forwardingReady = true
+    log('转发白名单已注入: ' + EVENT + '（后续 Web 连接可接收）')
+  }
+  void setupForwarding()
+
+  /** Web 页面心跳：POST /turn-notify/presence（页面开着期间客户端插件定期上报）。 */
+  let presenceLastSeen = 0
+  interface WebServerLike {
+    register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: unknown, res: { writeHead(code: number): { end(): void } }) => void }): () => void
+  }
+  ctx.inject(['webServer'], (scope) => {
+    const wsCtx = scope as Context & { webServer: WebServerLike }
+    const dispose = wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/turn-notify/presence',
+      handler: (_req, res) => {
+        presenceLastSeen = Date.now()
+        res.writeHead(204).end()
+      },
+    })
+    log('心跳端点已注册: POST /turn-notify/presence')
+    wsCtx.effect(() => dispose, 'turn-notify: presence route')
+  })
+
+  /**
+   * 点击回调双路径：心跳新鲜（页面已开）→ 转发事件直达已开页面切会话，
+   * 零浏览器启动（不重复开标签页）；过期（页面未开）→ OS 深链打开，
+   * 新页面读 hash 定位会话并开始心跳，后续点击即走复用路径。
+   */
+  const handleNotificationClick = (sessionId: string): void => {
+    if (forwardingReady && Date.now() - presenceLastSeen < config.presenceTimeoutMs) {
+      log('notification click → 转发给已开 Web 页面:', sessionId)
+      ctx.emit('turn-notify/focus', { sessionId })
+      return
+    }
+    log('notification click → 无活跃页面，深链打开:', sessionId)
     const opener = platform === 'macos' ? 'open' : platform === 'windows' ? 'cmd' : 'xdg-open'
     const args = platform === 'windows' ? ['/c', 'start', '', deepLinkUrl(config, sessionId)] : [deepLinkUrl(config, sessionId)]
     run(opener, args, (m) => warnOnce('deep-link', m))
@@ -314,7 +391,7 @@ export function apply(ctx: Context, config: Config) {
             run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
             return
           }
-          if (String(stdout).trim() === 'default') openDeepLink(vars.sessionId)
+          if (String(stdout).trim() === 'default') handleNotificationClick(vars.sessionId)
         })
         child.unref?.()
       } else {
