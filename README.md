@@ -134,6 +134,9 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
 - **macOS**：`node tests/macos-click.mjs` —— 自动发带 `-open` 深链的 terminal-notifier 通知，
   用辅助功能 API 自动点击卡片，本地监听器接住深链请求即 PASS（前置：brew 装
   terminal-notifier + 终端获得辅助功能授权；也可 10 秒内手动点）。
+- **Windows 快速冒烟**（不想 clone 仓库时）：单文件 `tests/windows-notify-smoke.cjs`，
+  零依赖（Node + 系统 PowerShell 5.1），`node windows-notify-smoke.js [标题] [正文]`——
+  只验证卡片显示，不测点击。
 - **Windows**：`node tests/windows-click.mjs [--auto]` —— 投递与插件同源的
   protocol-launch toast，点击（默认人工，`--auto` 尝试 UIA 自动点击会动鼠标）后
   默认浏览器打开深链，监听器收到即 PASS。
