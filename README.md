@@ -54,8 +54,12 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 Windows 实现注记：通知脚本经 PowerShell `-EncodedCommand`
 （UTF-16LE base64）投递，规避引号转义问题，零第三方依赖；
 AppUserModelId 借用系统 PowerShell 自身 AUMID 保证通知中心可靠显示。
-**Windows 路径按 Win10/11 官方 Toast API 实现，尚未真机验证**
-（开发环境无 Windows）；如有问题请提 issue。
+
+Windows 验证状态（Linux pwsh 7.4 + 官方 Parser 三层工装
+`tests/windows-pwsh.mjs`，CI 常跑）：编码往返无损（中日文/引号/
+反斜杠/emoji）、对抗注入字符串下脚本语法零错误、真实执行精确停在
+WinRT 类型加载——即解码/解析/转义全部正确，**仅 toast 的最终显示
+仍需真 Windows 真机确认**；如有问题请提 issue。
 
 ## 噪音过滤
 
@@ -93,8 +97,8 @@ dsh plugin --profile web remove dsh-turn-notify
 settings.yaml 的配置修改则是热生效）。
 
 已实测：dsh 0.1.1-rc.2（Linux 真机：本地 link: 安装 + GitHub git 安装
-真实装载、通知/提示音/goal 判别/模板；macOS/Windows 后端按官方 API 实现，
-Windows 待真机验证）。
+真实装载、通知/提示音/goal 判别/模板；Windows 路径经 Linux pwsh 三层
+工装验证至 WinRT 边界，toast 显示待真机；macOS 后端按官方 API 实现）。
 
 ## 开发
 
