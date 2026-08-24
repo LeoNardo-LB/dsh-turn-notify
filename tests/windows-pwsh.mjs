@@ -12,7 +12,7 @@
 // 用法：node tests/windows-pwsh.mjs [powershell/pwsh 路径]
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
-const { buildToastScript, buildBalloonScript, buildSoundScript, encodePs } = plugin
+const { buildToastScript, buildBalloonScript, buildEnsureAumidScript, buildSoundScript, encodePs } = plugin
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -74,6 +74,24 @@ const decodedSilent = Buffer.from(encodePs(buildToastScript('T', 'B', undefined,
 assert.ok(decodedSilent.includes('<audio silent="true"/>'), "audio='silent' 必须显式静音（自定义 soundFile / sound=false）")
 assert.ok(!decodedSilent.includes('activationType'), 'silent 无深链组合合法')
 
+// AUMID 品牌（v0.2.2-dev.7）：默认 PowerShell AUMID（$tnAumid 变量注入）；
+// aumidSetup 注入自有 AUMID 注册脚本（开始菜单 dsh.lnk + 属性存储 +
+// Get-StartApps 校验，失败保持回退值不影响显示）
+assert.ok(decodedPlain.includes("$tnAumid = '{1AC14E77"), '默认 AUMID = PowerShell（可靠显示兜底）')
+assert.ok(decodedPlain.includes('CreateToastNotifier($tnAumid)'), 'toast 经 $tnAumid 变量选择归属')
+const DSH_AUMID = 'LeoNardo-LB.dsh-turn-notify'
+const ensure = buildEnsureAumidScript(DSH_AUMID)
+const branded = buildToastScript('T', 'B', launchUrl, 'system', ensure)
+assert.ok(branded.includes("$tnAumid = '{1AC14E77"), '品牌 toast 仍以 PowerShell AUMID 为初值（注册失败兜底）')
+assert.ok(branded.includes("$lnk = Join-Path $env:APPDATA 'Microsoft"), '注册脚本创建开始菜单快捷方式')
+assert.ok(branded.includes('AumidHelper'), '注册脚本含属性存储 P/Invoke')
+assert.ok(branded.includes('System.AppUserModel.ID'.replace('System.AppUserModel.ID', '9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3')), 'AUMID 属性键 GUID（System.AppUserModel.ID pid=5）')
+assert.ok(branded.includes('Get-StartApps'), '注册后经 Get-StartApps 校验')
+assert.ok(branded.includes("if ($listed) { $tnAumid = '" + DSH_AUMID + "' }"), '校验通过才改写归属（失败保持回退）')
+const out5 = check(encodePs(branded))
+console.log(out5.split('\n')[0])
+assert.ok(out5.includes('PARSE-OK'), '品牌 toast（含 C# here-string）语法零错误')
+
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)
 console.log(out2.split('\n')[0])
@@ -103,6 +121,13 @@ assert.ok(out4.includes('PARSE-OK'), 'balloon 脚本语法零错误')
 assert.ok(out4.includes('ROUNDTRIP-OK'), 'balloon 标题中日文/引号/emoji 编码往返无损')
 const balloonMuted = buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 30, false)
 assert.ok(balloonMuted.includes('ToolTipIcon]::None'), 'sound=false balloon 用 None（尽力静音）')
+// balloon 寿命（#1 真机反馈回归锁）：驻留时长 5 分钟档，上限 1 小时；
+// 通知中心卡片在进程退出后是死卡片，驻留必须远超旧默认 30s
+const balloonLong = buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 300, true)
+assert.ok(balloonLong.includes('AddSeconds(300)'), '5 分钟驻留')
+assert.ok(balloonLong.includes('ShowBalloonTip(60000)'), 'BalloonTip 显示毫秒封顶 60s（系统上限）')
+const balloonHuge = buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 99999, true)
+assert.ok(balloonHuge.includes('AddSeconds(3600)'), '驻留上限 1 小时（防滥用封顶）')
 
 /** 触发真实插件（平台 windows）发出一次 toast。 */
 async function triggerPlugin() {

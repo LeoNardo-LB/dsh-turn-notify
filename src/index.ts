@@ -108,6 +108,7 @@ export interface Config {
   terminalNotifierPath: string
   windowsClickMode: 'auto' | 'balloon' | 'toast'
   balloonWaitMs: number
+  windowsToastAumid: 'auto' | 'powershell'
   presenceTimeoutMs: number
   appName: string
   expireMs: number
@@ -150,8 +151,12 @@ export const Config: Schema<Config> = Schema.object({
     Schema.const('balloon' as const).description('恒用 NotifyIcon balloon：点击回调进进程，不经浏览器'),
     Schema.const('toast' as const).description('恒用 WinRT toast protocol launch：点击=系统用浏览器打开深链（自定义提示音需要此模式）'),
   ]).default('auto').description('Windows 点击回调机制（balloon 的系统音不可静音/替换，配置 soundFile 时自动落到 toast）'),
-  balloonWaitMs: Schema.number().default(30000).description('Windows balloon 等待点击的时长（毫秒）：进程驻留监听点击，超时退出（通知卡片可能仍在通知中心，其后点击无效果）'),
-  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒）：focus-wait 长轮询最近到达时间在阈值内 = 页面已开，Linux 点击走零启动复用；超过视为未开，深链新开浏览器'),
+  balloonWaitMs: Schema.number().default(300000).description('Windows balloon 等待点击的时长（毫秒，默认 5 分钟）：进程驻留监听点击；超时退出后通知中心里的卡片成死卡片（点击无效果）。每次通知一个驻留进程，按需调小'),
+  windowsToastAumid: Schema.union([
+    Schema.const('auto' as const).description('注册自有 AUMID（开始菜单 dsh 快捷方式）并以 dsh 名义显示 toast；注册/校验失败自动回退 PowerShell AUMID'),
+    Schema.const('powershell' as const).description('恒用系统 PowerShell 的 AUMID（旧行为：通知归属显示 Windows PowerShell）'),
+  ]).default('auto').description('Windows toast 的 AppUserModelID（通知归属/品牌显示）'),
+  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒），仅在发起通知时辅助选 balloon/toast；点击时刻的在线判定用瞬时真值（当下是否有挂起的 focus-wait 长轮询）'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -177,6 +182,13 @@ const DEFAULT_SOUND: Record<Platform, string> = {
 
 /** Windows toast 借用的系统 PowerShell AUMID（保证通知中心可靠显示）。 */
 const POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+/**
+ * 自有 AUMID：通知归属显示 dsh（而非 Windows PowerShell）。需要开始菜单
+ * 快捷方式承载（Windows 对非打包应用的 AUMID 显示名取自同名 .lnk），
+ * buildEnsureAumidScript 负责创建并注册，失败自动回退 POWERSHELL_AUMID。
+ */
+const DSH_AUMID = 'LeoNardo-LB.dsh-turn-notify'
 
 /** 宿主 sessionTitle 服务的最小读取面（可选服务，未挂载时 ctx.get 返回 undefined）。 */
 interface TitleServiceLike {
@@ -262,18 +274,105 @@ function deepLinkUrl(config: Config, sessionId: string): string {
  * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
  * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
  * 承载，或 sound=false）。
+ * 通知归属 AUMID 经 $tnAumid 变量注入（默认 PowerShell AUMID）；
+ * aumidSetup 是插在其后的 PowerShell 片段（buildEnsureAumidScript 产物），
+ * 可在显示前把 $tnAumid 改写为已验证的自有 AUMID（dsh 品牌）。
  */
-export function buildToastScript(title: string, body: string, launchUrl?: string, audio: 'system' | 'silent' = 'system'): string {
+export function buildToastScript(title: string, body: string, launchUrl?: string, audio: 'system' | 'silent' = 'system', aumidSetup = ''): string {
   const launch = launchUrl === undefined ? '' : ' activationType="protocol" launch="' + xmlEscape(launchUrl) + '"'
   const audioEl = audio === 'silent' ? '<audio silent="true"/>' : ''
   const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual>' + audioEl + '</toast>'
-  return [
+  const lines = [
+    "$tnAumid = '" + POWERSHELL_AUMID + "'",
+    ...aumidSetup.split('\n').filter(l => l.length > 0),
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
     '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
     '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
     "$xml.LoadXml(" + psSingle(xml) + ")",
     '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
-    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "').Show($toast)",
+    '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($tnAumid).Show($toast)',
+  ]
+  return lines.join('\n')
+}
+
+/**
+ * 自有 AUMID 的注册与校验脚本（导出供测试在真实 PowerShell 下解析验证）。
+ * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式，
+ * 故：无 dsh.lnk 则创建（目标为无害的隐藏 PowerShell 退出命令）→ 未在
+ * Get-StartApps 列出则经属性存储写入 System.AppUserModel.ID → 最终仍
+ * 未列出（注册失败/被清理）则不改写 $tnAumid（保持回退值 PowerShell
+ * AUMID）。全程 try/catch：品牌注册任何失败都不影响通知显示本身。
+ */
+export function buildEnsureAumidScript(aumid: string): string {
+  const csharp = [
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'namespace DshTurnNotify {',
+    '  public static class AumidHelper {',
+    '    [StructLayout(LayoutKind.Sequential)]',
+    '    public struct PROPERTYKEY { public Guid fmtid; public int pid; }',
+    '    [StructLayout(LayoutKind.Explicit)]',
+    '    public struct PROPVARIANT {',
+    '      [FieldOffset(0)] public ushort vt;',
+    '      [FieldOffset(8)] public IntPtr pointerValue;',
+    '    }',
+    '    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]',
+    '    public interface IPropertyStore {',
+    '      void GetCount(out uint propertyCount);',
+    '      void GetAt(uint propertyIndex, out PROPERTYKEY key);',
+    '      void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);',
+    '      void SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);',
+    '      void Commit();',
+    '    }',
+    '    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]',
+    '    public static extern void SHGetPropertyStoreFromParsingName(',
+    '      [MarshalAs(UnmanagedType.LPWStr)] string path,',
+    '      IntPtr bindContext,',
+    '      uint flags,',
+    '      ref Guid interfaceId,',
+    '      [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore);',
+    '    public static void Set(string shortcutPath, string appUserModelId) {',
+    '      Guid interfaceId = typeof(IPropertyStore).GUID;',
+    '      IPropertyStore store;',
+    '      SHGetPropertyStoreFromParsingName(shortcutPath, IntPtr.Zero, 0, ref interfaceId, out store);',
+    '      PROPERTYKEY key = new PROPERTYKEY();',
+    '      key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");',
+    '      key.pid = 5;',
+    '      PROPVARIANT value = new PROPVARIANT();',
+    '      value.vt = 31;',
+    '      value.pointerValue = Marshal.StringToCoTaskMemUni(appUserModelId);',
+    '      try {',
+    '        store.SetValue(ref key, ref value);',
+    '        store.Commit();',
+    '      } finally {',
+    '        Marshal.FreeCoTaskMem(value.pointerValue);',
+    '        Marshal.ReleaseComObject(store);',
+    '      }',
+    '    }',
+    '  }',
+    '}',
+  ].join('\n')
+  return [
+    'try {',
+    "  $lnk = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\dsh.lnk'",
+    '  if (-not (Test-Path $lnk)) {',
+    '    $ws = New-Object -ComObject WScript.Shell',
+    '    $sc = $ws.CreateShortcut($lnk)',
+    "    $sc.TargetPath = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
+    "    $sc.Arguments = '-NoProfile -WindowStyle Hidden -Command exit'",
+    "    $sc.Description = 'dsh turn-notify notification branding (AppUserModelID holder)'",
+    '    $sc.Save()',
+    '  }',
+    "  $listed = Get-StartApps | Where-Object { $_.AppID -eq '" + aumid + "' }",
+    '  if (-not $listed) {',
+    "    Add-Type -TypeDefinition @'",
+    csharp,
+    "'@",
+    "    [DshTurnNotify.AumidHelper]::Set($lnk, '" + aumid + "')",
+    "    $listed = Get-StartApps | Where-Object { $_.AppID -eq '" + aumid + "' }",
+    '  }',
+    '  if ($listed) { $tnAumid = ' + psSingle(aumid) + ' }',
+    '} catch { }',
   ].join('\n')
 }
 
@@ -287,9 +386,12 @@ export function buildMacNotifyScript(title: string, body: string): string {
  * shell 把 BalloonTip 提升为 toast 显示；点击路由回 NotifyIcon（Win10/11
  * 兼容行为）→ POST clickUrl {sessionId} → 响应 {open:true}（无在线页面）
  * 或网络失败时 Start-Process 深链兜底。进程驻留至多 waitSeconds 等
- * 点击（DoEvents 消息泵），超时静默退出。
+ * 点击（DoEvents 消息泵），超时静默退出。默认 5 分钟（通知中心里的
+ * 卡片在进程退出后成为死卡片——点击无效果，故驻留要长）。
  */
 export function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string {
+  const secs = Math.max(1, Math.min(3600, Math.ceil(waitSeconds)))
+  const tipMs = Math.min(60000, secs * 1000)
   return [
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
@@ -307,8 +409,8 @@ export function buildBalloonScript(title: string, body: string, sessionId: strin
     '$icon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::' + (soundOn ? 'Info' : 'None'),
     '$script:clicked = $false',
     '$icon.Add_BalloonTipClicked({ $script:clicked = $true })',
-    '$icon.ShowBalloonTip(' + Math.max(1, Math.min(120, Math.ceil(waitSeconds))) * 1000 + ')',
-    '$deadline = (Get-Date).AddSeconds(' + Math.max(1, Math.min(300, Math.ceil(waitSeconds))) + ')',
+    '$icon.ShowBalloonTip(' + tipMs + ')',
+    '$deadline = (Get-Date).AddSeconds(' + secs + ')',
     'while (-not $script:clicked -and (Get-Date) -lt $deadline) {',
     '  [System.Windows.Forms.Application]::DoEvents()',
     '  Start-Sleep -Milliseconds 120',
@@ -505,7 +607,9 @@ export function apply(ctx: Context, config: Config) {
     })
     // balloon 点击回调入口：入队聚焦 + 告知回调方是否需要深链开浏览器
     // （页面在线 → {open:false}，已开页面原地切换；离线 → {open:true}，
-    // 调用方 Start-Process 深链）。
+    // 调用方 Start-Process 深链）。在线判定用瞬时真值（当下是否有挂起的
+    // focus-wait 请求）：时间窗推断（presenceFresh）在页面刚关闭时会误判
+    // 在线 → open:false → 点击无任何效果。
     const disposeClick = wsCtx.webServer.register({
       kind: 'exact',
       path: '/turn-notify/click',
@@ -513,8 +617,9 @@ export function apply(ctx: Context, config: Config) {
         const chunks: Buffer[] = []
         const r = req as { on?: (ev: string, fn: (d?: Buffer) => void) => unknown }
         const finish = (sessionId: string): void => {
-          const open = !(sessionId.length > 0 && sessionId.length <= 256) || !presenceFresh()
-          if (sessionId.length > 0 && sessionId.length <= 256) {
+          const valid = sessionId.length > 0 && sessionId.length <= 256
+          const open = !valid || focusWaiters.size === 0
+          if (valid) {
             log('balloon click →', sessionId, 'open=' + open)
             enqueueFocus(sessionId)
           }
@@ -552,14 +657,18 @@ export function apply(ctx: Context, config: Config) {
     }, 'turn-notify: focus routes')
   })
 
+  /** 发起通知时的在线预判：瞬时真值优先，时间窗兜底（选 balloon/toast 用）。 */
+  const presenceLikelyOnline = (): boolean => focusWaiters.size > 0 || presenceFresh()
+
   /**
    * 点击回调（Linux notify-send -A 的进程内回调）：页面在线 → 入队分发
    * 给已开页面（零浏览器启动，不重复开标签页）；离线 → OS 深链打开，
    * 新页面读 hash 定位会话并开始长轮询，后续点击即走复用路径。
-   * Windows/macOS 无进程内回调（点击=系统直接用浏览器打开深链 URL）。
+   * Windows balloon 点击经 /turn-notify/click 端点（同样语义）；
+   * macOS 无进程内回调（点击=系统直接用浏览器打开深链 URL）。
    */
   const handleNotificationClick = (sessionId: string): void => {
-    if (presenceFresh()) {
+    if (focusWaiters.size > 0) {
       log('notification click → 分发给已开 Web 页面:', sessionId)
       enqueueFocus(sessionId)
       return
@@ -618,24 +727,26 @@ export function apply(ctx: Context, config: Config) {
       // 显式 toast 模式或页面离线时用 protocol launch（点击=系统开浏览器）。
       const wantBalloon = clickable && !customSound
         && (config.windowsClickMode === 'balloon'
-          || (config.windowsClickMode === 'auto' && presenceFresh()))
+          || (config.windowsClickMode === 'auto' && presenceLikelyOnline()))
+      // toast 的 AUMID 品牌 setup（windowsToastAumid=powershell 时不注入）
+      const aumidSetup = config.windowsToastAumid === 'auto' ? buildEnsureAumidScript(DSH_AUMID) : ''
       if (wantBalloon) {
         const base = config.webUrl.replace(/\/$/, '')
         const script = buildBalloonScript(title, body, vars.sessionId, base + '/turn-notify/click', deepLinkUrl(config, vars.sessionId), Math.ceil(config.balloonWaitMs / 1000), config.sound)
-        // balloon 进程驻留等点击（至多 balloonWaitMs），execFile 的 10s 通用
-        // 超时不够；timeout 0 + unref（与 Linux notify-send -A 同款）。
+        // balloon 进程驻留等点击（至多 balloonWaitMs，默认 5 分钟），execFile
+        // 的 10s 通用超时不够；timeout 0 + unref（与 Linux notify-send -A 同款）。
         const child = execFile('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(script)], { timeout: 0 }, (err) => {
           if (err !== null) {
             // balloon 失败（无桌面会话等）→ 降级 toast（无点击深链照发）
             const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
-            run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch))], (m) => warnOnce('windows-toast', m))
+            run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, 'system', aumidSetup))], (m) => warnOnce('windows-toast', m))
           }
         })
         child.unref?.()
       } else {
         const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
         const audio = customSound || !config.sound ? 'silent' : 'system'
-        run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, audio))], (m) => warnOnce('windows-toast', m))
+        run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, audio, aumidSetup))], (m) => warnOnce('windows-toast', m))
       }
     } else {
       warnOnce('platform', '未知平台（process.platform=' + process.platform + '），只有 bell/command 通道可用')

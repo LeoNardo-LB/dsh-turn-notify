@@ -71,8 +71,13 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
   内容/音效（见上节）。
 
 Windows 实现注记：通知脚本经 PowerShell `-EncodedCommand`
-（UTF-16LE base64）投递，规避引号转义问题，零第三方依赖；
-AppUserModelId 借用系统 PowerShell 自身 AUMID 保证通知中心可靠显示。
+（UTF-16LE base64）投递，规避引号转义问题，零第三方依赖。通知归属
+（品牌显示）：`windowsToastAumid: auto`（默认）注册自有 AUMID
+（开始菜单 dsh 快捷方式 + System.AppUserModel.ID 属性写入 +
+Get-StartApps 校验）→ toast 以 **dsh** 名义显示；注册/校验失败自动
+回退系统 PowerShell AUMID（保证通知中心可靠显示）。balloon 卡片的
+归属跟随宿主进程显示 Windows PowerShell（脚本宿主无法改名——要品牌
+一致可置 `windowsClickMode: 'toast'`）。
 
 Windows 验证状态（Linux pwsh 7.4 + 官方 Parser 三层工装
 `tests/windows-pwsh.mjs`，CI 常跑）：编码往返无损（中日文/引号/
@@ -150,20 +155,22 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
 - **POST `/turn-notify/click`**：balloon 点击回调入口（Windows）——
   入队聚焦 + 响应 `{open}`：页面在线 `false`（已开页面原地切换，
   零新标签页）；离线 `true`（回调进程 Start-Process 深链开浏览器）。
+  **在线判定 = 瞬时真值**（当下是否有挂起的 focus-wait 请求），不用
+  时间窗推断——页面刚关闭时时间窗会误判在线 → `open:false` → 点击
+  无任何效果（真机反馈过的死点击）。
 
 平台点击路径：
 
-- **Linux**（`notify-send -A` 进程内回调）：页面在线（长轮询新鲜，
-  < `presenceTimeoutMs` 默认 15s）→ 入队分发已开页面，**零浏览器
-  启动、不重复开标签页**；离线 → xdg-open 深链新开浏览器。
+- **Linux**（`notify-send -A` 进程内回调）：页面在线（挂起长轮询）→
+  入队分发已开页面，**零浏览器启动、不重复开标签页**；离线 →
+  xdg-open 深链新开浏览器。
 - **Windows**（`windowsClickMode: auto`，默认）：页面在线 → **NotifyIcon
   balloon**（shell 提升为 toast 显示，点击路由回 NotifyIcon——Win10/11
-  兼容行为）→ POST click 端点 → 已开页面原地切换，**零新标签页**；
-  页面离线 → WinRT toast protocol launch，点击 = 系统用浏览器打开深链。
-  `balloon` 恒用 balloon；`toast` 恒用 protocol launch（配置自定义
-  soundFile 时自动落到 toast——balloon 的系统音不可静音/替换）。
-  balloon 点击路由行为**待真机验证**（机制为 Win10/11 的 balloon
-  兼容提升；若个别环境不路由，置 `windowsClickMode: 'toast'` 退回）。
+  兼容行为，真机已验证可路由）→ POST click 端点 → 已开页面原地切换，
+  **零新标签页**；页面离线 → WinRT toast protocol launch，点击 =
+  系统用浏览器打开深链。`balloon` 恒用 balloon；`toast` 恒用
+  protocol launch（配置自定义 soundFile 时自动落到 toast——balloon 的
+  系统音不可静音/替换）。
 - **macOS**：terminal-notifier `-open` 的点击 = 系统直接用浏览器打开
   深链 URL（无进程回调）。落地页读 `#dsh-focus=<sessionId>` 聚焦正确
   会话（带会话列表竞态重试：新页列表异步晚到，`open` 对未列出会话
@@ -222,9 +229,11 @@ pnpm test             # goal 判别逻辑仿真测试
   toast 提升与点击回传是 Win10/11 兼容行为）；不可靠时置
   `windowsClickMode: 'toast'` 退回 protocol launch——此时浏览器已开
   则点击必然新开一个标签页（浏览器打开 URL 的平台行为）。
-- balloon 进程驻留至多 `balloonWaitMs`（默认 30s）；超时后卡片可能
-  仍在通知中心，但其后点击无效果。balloon 的系统音不可静音/替换
-  （要自定义音效请配 soundFile，自动落 toast 模式）。
+- balloon 进程驻留 `balloonWaitMs`（默认 5 分钟，上限 1 小时，每次通知
+  一个驻留 PowerShell 进程）；超时后通知中心里的残留卡片是死卡片
+  （点击无效果）。balloon 的系统音不可静音/替换（要自定义音效请配
+  soundFile，自动落 toast 模式）；balloon 归属显示 Windows PowerShell
+  （见 `windowsToastAumid` 注记）。
 - **macOS 浏览器已开时，点击通知必然新开一个标签页**（terminal-notifier
   点击=系统用浏览器打开深链，无进程回调）；落地页聚焦正确会话、其它
   已开标签页同步切换。Linux/Windows(balloon) 不受此限。

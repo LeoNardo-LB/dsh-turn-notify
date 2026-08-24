@@ -91,6 +91,7 @@ export interface Config {
     terminalNotifierPath: string;
     windowsClickMode: 'auto' | 'balloon' | 'toast';
     balloonWaitMs: number;
+    windowsToastAumid: 'auto' | 'powershell';
     presenceTimeoutMs: number;
     appName: string;
     expireMs: number;
@@ -110,8 +111,20 @@ export declare const Config: Schema<Config>;
  * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
  * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
  * 承载，或 sound=false）。
+ * 通知归属 AUMID 经 $tnAumid 变量注入（默认 PowerShell AUMID）；
+ * aumidSetup 是插在其后的 PowerShell 片段（buildEnsureAumidScript 产物），
+ * 可在显示前把 $tnAumid 改写为已验证的自有 AUMID（dsh 品牌）。
  */
-export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent'): string;
+export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumidSetup?: string): string;
+/**
+ * 自有 AUMID 的注册与校验脚本（导出供测试在真实 PowerShell 下解析验证）。
+ * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式，
+ * 故：无 dsh.lnk 则创建（目标为无害的隐藏 PowerShell 退出命令）→ 未在
+ * Get-StartApps 列出则经属性存储写入 System.AppUserModel.ID → 最终仍
+ * 未列出（注册失败/被清理）则不改写 $tnAumid（保持回退值 PowerShell
+ * AUMID）。全程 try/catch：品牌注册任何失败都不影响通知显示本身。
+ */
+export declare function buildEnsureAumidScript(aumid: string): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export declare function buildMacNotifyScript(title: string, body: string): string;
 /**
@@ -119,7 +132,8 @@ export declare function buildMacNotifyScript(title: string, body: string): strin
  * shell 把 BalloonTip 提升为 toast 显示；点击路由回 NotifyIcon（Win10/11
  * 兼容行为）→ POST clickUrl {sessionId} → 响应 {open:true}（无在线页面）
  * 或网络失败时 Start-Process 深链兜底。进程驻留至多 waitSeconds 等
- * 点击（DoEvents 消息泵），超时静默退出。
+ * 点击（DoEvents 消息泵），超时静默退出。默认 5 分钟（通知中心里的
+ * 卡片在进程退出后成为死卡片——点击无效果，故驻留要长）。
  */
 export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string;
 /** Windows 提示音脚本（导出供测试验证）。 */

@@ -182,12 +182,11 @@ const postJson = (handler, obj) => {
     return await done
   })()
 }
-// 无在线 presence（H2 的 wait 已超过 presenceTimeoutMs=600ms 前）→ open:true
-await sleep(700)
+// 在线判定为瞬时真值（当下是否有挂起的 focus-wait）——与时间窗无关
 const click1 = await postJson(clickHandler, { sessionId: 'sim-click-1' })
 assert.equal(click1.code, 200, 'click 应回 200')
-assert.equal(JSON.parse(click1.body).open, true, '无在线页面时 open=true（调用方需深链开浏览器）')
-// 注册 presence（一次 wait 到达）→ open:false 且入队（后续 wait 可取到条目）
+assert.equal(JSON.parse(click1.body).open, true, '无挂起 wait 时 open=true（调用方需深链开浏览器）')
+// 挂起 wait（页面在线）→ open:false 且入队（wait 立即唤醒带回条目）
 // since 用当前已入队最大 seq（H1 的 1 + click1 的 2）：既无待取条目可挂起，
 // 唤醒过滤（seq > since）也能带回 click 的新条目
 const keepAlive3 = setInterval(() => {}, 1000)
@@ -195,12 +194,17 @@ const h3 = makeRes()
 void Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t2&since=2' }, h3.res)).then(() => h3.done)
 await sleep(150)
 const click2 = await postJson(clickHandler, { sessionId: 'sim-click-2' })
-assert.equal(JSON.parse(click2.body).open, false, '页面在线时 open=false（已开页面原地切换，零新标签页）')
+assert.equal(JSON.parse(click2.body).open, false, '页面在线（挂起 wait）时 open=false（已开页面原地切换，零新标签页）')
 const h3result = await Promise.race([h3.done, sleep(3000).then(() => null)])
 clearInterval(keepAlive3)
 assert.ok(h3result !== null, 'click 入队应唤醒挂起的 wait')
 const clickEntries = JSON.parse(h3result.body).entries
 assert.ok(clickEntries.some((e) => e.sessionId === 'sim-click-2'), '唤醒条目应含 click 的会话')
+// 回归锁（#1 真机反馈）：页面刚关闭（presence 时间窗内仍“新鲜”，但已无
+// 挂起 wait）→ 必须 open:true——旧的时间窗判定在此误判 open:false，
+// 导致点击无任何效果（既不开浏览器、页面也不存在）
+const clickStale = await postJson(clickHandler, { sessionId: 'sim-click-stale' })
+assert.equal(JSON.parse(clickStale.body).open, true, 'presence 新鲜但无挂起 wait → open:true（瞬时真值，防死点击）')
 // 非法 body → open:true 兜底
 const click3 = await postJson(clickHandler, {})
 assert.equal(JSON.parse(click3.body).open, true, '非法 body open=true 兜底（调用方开深链）')
