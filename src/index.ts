@@ -14,15 +14,23 @@
  *   聚焦通道（本插件经 webServer 服务注册）：GET /turn-notify/focus-wait
  *   长轮询（web 页面打开期间保持一个挂起请求，到达即记为页面在线
  *   presence）+ POST /turn-notify/focus（深链落地页广播聚焦，让其它已开
- *   标签页同步切换）。
- *   Linux notify-send -A 把点击回调进宿主进程：页面在线 → 点击入队，
- *   已开页面零浏览器启动直接切换；离线 → xdg-open 深链新开浏览器。
- *   Windows toast protocol launch / macOS terminal-notifier -open 的点击
- *   = 系统直接用浏览器打开深链 URL（无进程回调通道），浏览器已开时平台
- *   行为是新开标签页——落地页读 hash 聚焦正确会话（带列表竞态重试）并
- *   广播其它标签页同步切换。Windows toast 恒定 <audio silent="true"/>：
- *   平台唯一音源是 sound 通道（SoundPlayer），否则系统默认音与其叠加
- *   成双音效。
+ *   标签页同步切换）+ POST /turn-notify/click（balloon 点击回调入口：
+ *   入队聚焦 + 告知回调方是否需要深链开浏览器）。
+ *   Linux notify-send -A / Windows NotifyIcon balloon 都把点击回调进
+ *   我们自己的进程：页面在线 → 点击入队，已开页面零浏览器启动、零新
+ *   标签页直接切换；离线 → OS 深链新开浏览器（Windows 由 balloon 的
+ *   PowerShell 进程 Start-Process，Linux xdg-open）。
+ *   Windows balloon（shell 把 BalloonTip 提升为 toast 显示，点击路由回
+ *   NotifyIcon——Win10/11 兼容行为）是 windowsClickMode=auto 的默认路径；
+ *   'toast' 模式保留 protocol launch（点击=系统用浏览器打开深链，浏览器
+ *   已开时平台行为是新开标签页）。macOS terminal-notifier -open 同 toast
+ *   模式语义。
+ *
+ * Windows 音效（单音源原则，默认 = 系统通知音）：
+ *   默认（soundFile 留空）用通知自带的系统通知音，不再叠 SoundPlayer；
+ *   显式配置 soundFile 时才静音通知 + SoundPlayer 播自定义文件；
+ *   sound=false 全静音；notifySend=false（无通知面承载系统音）时
+ *   SoundPlayer 退回平台默认 wav。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
@@ -98,6 +106,8 @@ export interface Config {
   deepLinkHash: string
   notifyActivateActions: boolean
   terminalNotifierPath: string
+  windowsClickMode: 'auto' | 'balloon' | 'toast'
+  balloonWaitMs: number
   presenceTimeoutMs: number
   appName: string
   expireMs: number
@@ -121,7 +131,7 @@ export const Config: Schema<Config> = Schema.object({
   ]).default('auto').description('平台后端选择'),
   notifySend: Schema.boolean().default(true).description('桌面通知（按平台后端投递）'),
   sound: Schema.boolean().default(true).description('提示音（按平台后端投递）'),
-  soundFile: Schema.string().default('').description('提示音文件路径；留空 = 平台默认（linux freedesktop bell.oga / macos Glass.aiff / windows Windows Notify.wav）'),
+  soundFile: Schema.string().default('').description('提示音文件路径；留空 = 平台默认（linux freedesktop bell.oga / macos Glass.aiff；windows 用系统通知音，不额外发声）'),
   bell: Schema.boolean().default(false).description('向宿主 stdout 写 ASCII BEL（终端/SSH 场景）'),
   command: Schema.string().default('').description('通知触发时的自定义命令，占位符 {sessionId} {title} {question}；留空关闭'),
   notifyCommand: Schema.string().default('').description('完全接管桌面通知的命令模板（高级；同上占位符）；留空用平台后端'),
@@ -130,11 +140,17 @@ export const Config: Schema<Config> = Schema.object({
   questionTitleTemplate: Schema.string().default('{title}').description('提问通知标题模板，占位符 {title} {question} {sessionId}'),
   questionBodyTemplate: Schema.string().default('提问：{question}').description('提问通知正文模板，占位符同上'),
   questionSoundFile: Schema.string().default('').description('提问提示音文件；留空 = 与轮次结束共用 soundFile / 平台默认'),
-  clickToFocus: Schema.boolean().default(true).description('点击通知卡片回到对应会话：Linux 复用已开页面（零新标签页）；Windows/macOS 点击=系统用浏览器打开深链（浏览器已开时平台行为是新开标签页，落地即正确会话，其它标签页同步切换）'),
+  clickToFocus: Schema.boolean().default(true).description('点击通知卡片回到对应会话：Linux 与 Windows（balloon，页面在线时）复用已开页面、零新标签页；页面离线或 macOS 经 OS 深链打开浏览器直达会话'),
   webUrl: Schema.string().default('http://127.0.0.1:3080').description('点击通知打开的 Web 地址（页面没开时的深链目标 base）'),
   deepLinkHash: Schema.string().default('#dsh-focus=').description('深链 hash 前缀；页面侧客户端插件读取此 hash 定位会话'),
   notifyActivateActions: Schema.boolean().default(true).description('Linux：notify-send 用 -A/--action（点击后回调）；通知守护进程不支持 action 时置 false 退回普通通知'),
   terminalNotifierPath: Schema.string().default('terminal-notifier').description('macOS 点击回调依赖的 terminal-notifier 命令（PATH 名或绝对路径）；不存在时 macOS 通知无点击功能（仍正常显示）'),
+  windowsClickMode: Schema.union([
+    Schema.const('auto' as const).description('页面在线用 balloon（点击复用已开页面、零新标签页），离线用 toast 深链'),
+    Schema.const('balloon' as const).description('恒用 NotifyIcon balloon：点击回调进进程，不经浏览器'),
+    Schema.const('toast' as const).description('恒用 WinRT toast protocol launch：点击=系统用浏览器打开深链（自定义提示音需要此模式）'),
+  ]).default('auto').description('Windows 点击回调机制（balloon 的系统音不可静音/替换，配置 soundFile 时自动落到 toast）'),
+  balloonWaitMs: Schema.number().default(30000).description('Windows balloon 等待点击的时长（毫秒）：进程驻留监听点击，超时退出（通知卡片可能仍在通知中心，其后点击无效果）'),
   presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒）：focus-wait 长轮询最近到达时间在阈值内 = 页面已开，Linux 点击走零启动复用；超过视为未开，深链新开浏览器'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
@@ -149,7 +165,10 @@ export const Config: Schema<Config> = Schema.object({
   minRunMs: Schema.number().default(0).description('运行不足该毫秒数的轮次不通知'),
 })
 
-/** 平台默认提示音文件。 */
+/**
+ * 平台默认提示音文件。windows 项仅在 notifySend=false（无通知面承载
+ * 系统音）时使用；通知开着时 windows 默认音就是通知自带的系统通知音。
+ */
 const DEFAULT_SOUND: Record<Platform, string> = {
   linux: '/usr/share/sounds/freedesktop/stereo/bell.oga',
   macos: '/System/Library/Sounds/Glass.aiff',
@@ -240,12 +259,14 @@ function deepLinkUrl(config: Config, sessionId: string): string {
 
 /**
  * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
- * 恒定 <audio silent="true"/>：toast 自带默认系统音必须显式静音，平台
- * 唯一音源是 sound 通道（SoundPlayer）——否则两声叠加成双音效。
+ * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
+ * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
+ * 承载，或 sound=false）。
  */
-export function buildToastScript(title: string, body: string, launchUrl?: string): string {
+export function buildToastScript(title: string, body: string, launchUrl?: string, audio: 'system' | 'silent' = 'system'): string {
   const launch = launchUrl === undefined ? '' : ' activationType="protocol" launch="' + xmlEscape(launchUrl) + '"'
-  const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual><audio silent="true"/></toast>'
+  const audioEl = audio === 'silent' ? '<audio silent="true"/>' : ''
+  const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual>' + audioEl + '</toast>'
   return [
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
     '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
@@ -259,6 +280,50 @@ export function buildToastScript(title: string, body: string, launchUrl?: string
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export function buildMacNotifyScript(title: string, body: string): string {
   return 'display notification ' + appleString(body) + ' with title ' + appleString(title)
+}
+
+/**
+ * Windows NotifyIcon balloon 通知脚本（导出供测试在真实 PowerShell 下验证）。
+ * shell 把 BalloonTip 提升为 toast 显示；点击路由回 NotifyIcon（Win10/11
+ * 兼容行为）→ POST clickUrl {sessionId} → 响应 {open:true}（无在线页面）
+ * 或网络失败时 Start-Process 深链兜底。进程驻留至多 waitSeconds 等
+ * 点击（DoEvents 消息泵），超时静默退出。
+ */
+export function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string {
+  return [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    'Add-Type -AssemblyName System.Drawing',
+    '$clickUrl = ' + psSingle(clickUrl),
+    '$deepLink = ' + psSingle(deepLink),
+    '$body = ' + psSingle('{"sessionId":' + JSON.stringify(sessionId) + '}'),
+    '$icon = New-Object System.Windows.Forms.NotifyIcon',
+    '$icon.Icon = [System.Drawing.SystemIcons]::Information',
+    '$tip = ' + psSingle(title),
+    'if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 63) }',
+    '$icon.Text = $tip',
+    '$icon.Visible = $true',
+    '$icon.BalloonTipTitle = ' + psSingle(title),
+    '$icon.BalloonTipText = ' + psSingle(body),
+    '$icon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::' + (soundOn ? 'Info' : 'None'),
+    '$script:clicked = $false',
+    '$icon.Add_BalloonTipClicked({ $script:clicked = $true })',
+    '$icon.ShowBalloonTip(' + Math.max(1, Math.min(120, Math.ceil(waitSeconds))) * 1000 + ')',
+    '$deadline = (Get-Date).AddSeconds(' + Math.max(1, Math.min(300, Math.ceil(waitSeconds))) + ')',
+    'while (-not $script:clicked -and (Get-Date) -lt $deadline) {',
+    '  [System.Windows.Forms.Application]::DoEvents()',
+    '  Start-Sleep -Milliseconds 120',
+    '}',
+    '$icon.Visible = $false',
+    '$icon.Dispose()',
+    'if (-not $script:clicked) { exit 0 }',
+    'try {',
+    '  $r = Invoke-RestMethod -Method Post -Uri $clickUrl -ContentType \'application/json\' -Body $body -TimeoutSec 5',
+    '  if ($r.open -eq $true) { Start-Process $deepLink }',
+    '} catch {',
+    '  Start-Process $deepLink',
+'}',
+    'exit 0',
+  ].join('\n')
 }
 
 /** XML 文本节点转义（Windows toast 模板用）。 */
@@ -438,10 +503,51 @@ export function apply(ctx: Context, config: Config) {
         r.on('error', () => finish(''))
       },
     })
-    log('聚焦通道已注册: GET /turn-notify/focus-wait（长轮询 ' + pollHoldMs + 'ms）+ POST /turn-notify/focus')
+    // balloon 点击回调入口：入队聚焦 + 告知回调方是否需要深链开浏览器
+    // （页面在线 → {open:false}，已开页面原地切换；离线 → {open:true}，
+    // 调用方 Start-Process 深链）。
+    const disposeClick = wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/turn-notify/click',
+      handler: (req, res) => {
+        const chunks: Buffer[] = []
+        const r = req as { on?: (ev: string, fn: (d?: Buffer) => void) => unknown }
+        const finish = (sessionId: string): void => {
+          const open = !(sessionId.length > 0 && sessionId.length <= 256) || !presenceFresh()
+          if (sessionId.length > 0 && sessionId.length <= 256) {
+            log('balloon click →', sessionId, 'open=' + open)
+            enqueueFocus(sessionId)
+          }
+          try {
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({ open }))
+          } catch { /* 客户端已断开 */ }
+        }
+        if (typeof r.on !== 'function') {
+          finish('')
+          return
+        }
+        let size = 0
+        r.on('data', (d) => {
+          size += (d ?? Buffer.alloc(0)).length
+          if (size <= 1_000_000) chunks.push(d ?? Buffer.alloc(0))
+        })
+        r.on('end', () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { sessionId?: unknown }
+            finish(typeof body.sessionId === 'string' ? body.sessionId : '')
+          } catch {
+            finish('')
+          }
+        })
+        r.on('error', () => finish(''))
+      },
+    })
+    log('聚焦通道已注册: GET /turn-notify/focus-wait（长轮询 ' + pollHoldMs + 'ms）+ POST /turn-notify/focus + POST /turn-notify/click')
     wsCtx.effect(() => () => {
       disposeWait()
       disposePost()
+      disposeClick()
       for (const w of [...focusWaiters]) w.respond([])
     }, 'turn-notify: focus routes')
   })
@@ -464,8 +570,12 @@ export function apply(ctx: Context, config: Config) {
     run(opener, args, (m) => warnOnce('deep-link', m))
   }
 
-  /** fire-and-forget 桌面通知（按平台分发；notifyCommand 可完全接管）。 */
-  const sendDesktop = (title: string, body: string, vars: { title: string; question: string; sessionId: string }): void => {
+  /**
+   * fire-and-forget 桌面通知（按平台分发；notifyCommand 可完全接管）。
+   * soundFileOverride 与 sendSound 同源（提问用 questionSoundFile）：Windows
+   * 据它决定音源——显式文件 → toast 静音 + SoundPlayer；留空 → 系统通知音。
+   */
+  const sendDesktop = (title: string, body: string, vars: { title: string; question: string; sessionId: string }, soundFileOverride = ''): void => {
     const clickable = config.clickToFocus && config.notifySend
     if (config.notifyCommand) {
       runShellCommand(platform, render(config.notifyCommand, vars), (m) => warnOnce('notify-command', m))
@@ -500,9 +610,33 @@ export function apply(ctx: Context, config: Config) {
         run('osascript', ['-e', buildMacNotifyScript(title, body)], (m) => warnOnce('osascript', m))
       }
     } else if (platform === 'windows') {
-      // protocol launch：点击 = 系统用默认浏览器打开深链 URL（toast 标准能力）
-      const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
-      run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch))], (m) => warnOnce('windows-toast', m))
+      // 音源决策：显式 soundFile → toast 静音 + SoundPlayer 承载；留空 →
+      // toast 系统通知音（不再叠 SoundPlayer）；sound=false → 全静音。
+      const explicitFile = soundFileOverride !== '' ? soundFileOverride : config.soundFile
+      const customSound = config.sound && explicitFile !== ''
+      // 点击机制：balloon（进程内回调，复用已开页面）优先；自定义音或
+      // 显式 toast 模式或页面离线时用 protocol launch（点击=系统开浏览器）。
+      const wantBalloon = clickable && !customSound
+        && (config.windowsClickMode === 'balloon'
+          || (config.windowsClickMode === 'auto' && presenceFresh()))
+      if (wantBalloon) {
+        const base = config.webUrl.replace(/\/$/, '')
+        const script = buildBalloonScript(title, body, vars.sessionId, base + '/turn-notify/click', deepLinkUrl(config, vars.sessionId), Math.ceil(config.balloonWaitMs / 1000), config.sound)
+        // balloon 进程驻留等点击（至多 balloonWaitMs），execFile 的 10s 通用
+        // 超时不够；timeout 0 + unref（与 Linux notify-send -A 同款）。
+        const child = execFile('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(script)], { timeout: 0 }, (err) => {
+          if (err !== null) {
+            // balloon 失败（无桌面会话等）→ 降级 toast（无点击深链照发）
+            const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
+            run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch))], (m) => warnOnce('windows-toast', m))
+          }
+        })
+        child.unref?.()
+      } else {
+        const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
+        const audio = customSound || !config.sound ? 'silent' : 'system'
+        run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, audio))], (m) => warnOnce('windows-toast', m))
+      }
     } else {
       warnOnce('platform', '未知平台（process.platform=' + process.platform + '），只有 bell/command 通道可用')
     }
@@ -527,6 +661,14 @@ export function apply(ctx: Context, config: Config) {
       run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildSoundScript(file))], (m) => warnOnce('windows-sound', m))
     }
   }
+
+  /**
+   * Windows 单音源判定：通知面已带系统通知音（notifySend 开、sound 开、
+   * 无显式 soundFile/override）时跳过 SoundPlayer，避免双音效。
+   */
+  const windowsSystemAudioCovers = (override: string): boolean =>
+    platform === 'windows' && config.notifySend && config.sound
+    && (override !== '' ? override : config.soundFile) === ''
 
   const info = new Map<string, SessionInfo>()
   const getInfo = (id: string): SessionInfo => {
@@ -590,8 +732,8 @@ export function apply(ctx: Context, config: Config) {
       const body = render(config.questionBodyTemplate, vars)
       const finalVars = { title, question: body, sessionId }
       log('user question → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId)
-      if (config.notifySend) sendDesktop(title, body, finalVars)
-      if (config.sound) sendSound(finalVars, config.questionSoundFile)
+      if (config.notifySend) sendDesktop(title, body, finalVars, config.questionSoundFile)
+      if (config.sound && !windowsSystemAudioCovers(config.questionSoundFile)) sendSound(finalVars, config.questionSoundFile)
       if (config.bell) process.stdout.write('\x07')
       if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
     }
@@ -654,8 +796,8 @@ export function apply(ctx: Context, config: Config) {
 
       log('agent idle → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId, 'root=' + isRoot)
 
-      if (config.notifySend) sendDesktop(title, body, finalVars)
-      if (config.sound) sendSound(finalVars)
+      if (config.notifySend) sendDesktop(title, body, finalVars, '')
+      if (config.sound && !windowsSystemAudioCovers('')) sendSound(finalVars)
       if (config.bell) process.stdout.write('\x07')
       if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
     }

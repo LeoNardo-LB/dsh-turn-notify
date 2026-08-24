@@ -12,7 +12,7 @@
 // 用法：node tests/windows-pwsh.mjs [powershell/pwsh 路径]
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
-const { buildToastScript, buildSoundScript, encodePs } = plugin
+const { buildToastScript, buildBalloonScript, buildSoundScript, encodePs } = plugin
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -58,17 +58,21 @@ console.log(out1)
 assert.ok(out1.includes('PARSE-OK'), '正常字符串语法零错误')
 assert.ok(out1.includes('ROUNDTRIP-OK'), '中日文/引号/反斜杠/emoji 编码往返无损')
 
-// 点击跳转：protocol-launch toast 的 XML 断言（解码 -EncodedCommand 检查）
+// 点击跳转与音源：protocol-launch toast 的 XML 断言（解码 -EncodedCommand 检查）
 const launchUrl = 'http://127.0.0.1:3080/#dsh-focus=session-click-test'
+// 音源回归锁（v0.2.2-dev.6）：默认 = 系统通知音（无 <audio> 元素，不叠
+// SoundPlayer——双音效 bug 的修复反转）；'silent' 仅在自定义 soundFile /
+// sound=false 时出现
 const decodedClick = Buffer.from(encodePs(buildToastScript('T', 'B', launchUrl)), 'base64').toString('utf16le')
 assert.ok(decodedClick.includes('activationType="protocol"'), 'toast XML 应含 protocol 激活类型')
 assert.ok(decodedClick.includes('launch="' + launchUrl + '"'), 'toast XML 应含深链 launch 属性')
-// 静音断言（双音效回归锁）：toast 自带默认系统音必须显式静音——
-// 平台唯一音源是 sound 通道的 SoundPlayer，两者叠加即“两个音效一起响”
-assert.ok(decodedClick.includes('<audio silent="true"/>'), 'toast XML 应含 <audio silent="true"/>（系统默认音静音，SoundPlayer 为唯一音源）')
+assert.ok(!decodedClick.includes('<audio'), '默认 toast 不带 <audio> 元素（用系统通知音，SoundPlayer 不得叠加）')
 const decodedPlain = Buffer.from(encodePs(buildToastScript('T', 'B')), 'base64').toString('utf16le')
 assert.ok(!decodedPlain.includes('activationType'), '无深链时不应有激活属性')
-assert.ok(decodedPlain.includes('<audio silent="true"/>'), '无深链 toast 同样必须静音（sound=false 时也不该有系统音）')
+assert.ok(!decodedPlain.includes('<audio'), '默认无深链 toast 同样用系统音')
+const decodedSilent = Buffer.from(encodePs(buildToastScript('T', 'B', undefined, 'silent')), 'base64').toString('utf16le')
+assert.ok(decodedSilent.includes('<audio silent="true"/>'), "audio='silent' 必须显式静音（自定义 soundFile / sound=false）")
+assert.ok(!decodedSilent.includes('activationType'), 'silent 无深链组合合法')
 
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)
@@ -79,6 +83,26 @@ const winWav = 'C:' + String.fromCharCode(92) + 'Windows' + String.fromCharCode(
 const out3 = check(encodePs(buildSoundScript(winWav)))
 console.log(out3.split('\n')[0])
 assert.ok(out3.includes('PARSE-OK'), '声音脚本语法零错误')
+
+// balloon 脚本（Windows 点击复用路径）：真实 PowerShell 语法解析 + 关键内容
+const balloon = buildBalloonScript(
+  'PARTICLE-TITLE 报告“完成”', '请检查 <a> & \'quote\' C:\\path\\x 😊',
+  'win-sess-1', 'http://127.0.0.1:3080/turn-notify/click',
+  'http://127.0.0.1:3080/#dsh-focus=win-sess-1', 30, true,
+)
+assert.ok(balloon.includes('NotifyIcon'), 'balloon 脚本用 NotifyIcon')
+assert.ok(balloon.includes('Add_BalloonTipClicked'), 'balloon 脚本注册点击回调')
+assert.ok(balloon.includes("$clickUrl = 'http://127.0.0.1:3080/turn-notify/click'"), 'balloon 脚本携带 click 端点 URL')
+assert.ok(balloon.includes('Invoke-RestMethod -Method Post -Uri $clickUrl'), 'balloon 点击 POST 到 click 端点')
+assert.ok(balloon.includes('"sessionId":"win-sess-1"'), 'click POST 体携带 sessionId')
+assert.ok(balloon.includes("Start-Process $deepLink"), '离线兜底 Start-Process 深链')
+assert.ok(balloon.includes('ToolTipIcon]::Info'), 'sound=true 用 Info（系统音）')
+const out4 = check(encodePs(balloon))
+console.log(out4.split('\n')[0])
+assert.ok(out4.includes('PARSE-OK'), 'balloon 脚本语法零错误')
+assert.ok(out4.includes('ROUNDTRIP-OK'), 'balloon 标题中日文/引号/emoji 编码往返无损')
+const balloonMuted = buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 30, false)
+assert.ok(balloonMuted.includes('ToolTipIcon]::None'), 'sound=false balloon 用 None（尽力静音）')
 
 /** 触发真实插件（平台 windows）发出一次 toast。 */
 async function triggerPlugin() {

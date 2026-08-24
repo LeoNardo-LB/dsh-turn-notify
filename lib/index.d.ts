@@ -14,15 +14,23 @@
  *   聚焦通道（本插件经 webServer 服务注册）：GET /turn-notify/focus-wait
  *   长轮询（web 页面打开期间保持一个挂起请求，到达即记为页面在线
  *   presence）+ POST /turn-notify/focus（深链落地页广播聚焦，让其它已开
- *   标签页同步切换）。
- *   Linux notify-send -A 把点击回调进宿主进程：页面在线 → 点击入队，
- *   已开页面零浏览器启动直接切换；离线 → xdg-open 深链新开浏览器。
- *   Windows toast protocol launch / macOS terminal-notifier -open 的点击
- *   = 系统直接用浏览器打开深链 URL（无进程回调通道），浏览器已开时平台
- *   行为是新开标签页——落地页读 hash 聚焦正确会话（带列表竞态重试）并
- *   广播其它标签页同步切换。Windows toast 恒定 <audio silent="true"/>：
- *   平台唯一音源是 sound 通道（SoundPlayer），否则系统默认音与其叠加
- *   成双音效。
+ *   标签页同步切换）+ POST /turn-notify/click（balloon 点击回调入口：
+ *   入队聚焦 + 告知回调方是否需要深链开浏览器）。
+ *   Linux notify-send -A / Windows NotifyIcon balloon 都把点击回调进
+ *   我们自己的进程：页面在线 → 点击入队，已开页面零浏览器启动、零新
+ *   标签页直接切换；离线 → OS 深链新开浏览器（Windows 由 balloon 的
+ *   PowerShell 进程 Start-Process，Linux xdg-open）。
+ *   Windows balloon（shell 把 BalloonTip 提升为 toast 显示，点击路由回
+ *   NotifyIcon——Win10/11 兼容行为）是 windowsClickMode=auto 的默认路径；
+ *   'toast' 模式保留 protocol launch（点击=系统用浏览器打开深链，浏览器
+ *   已开时平台行为是新开标签页）。macOS terminal-notifier -open 同 toast
+ *   模式语义。
+ *
+ * Windows 音效（单音源原则，默认 = 系统通知音）：
+ *   默认（soundFile 留空）用通知自带的系统通知音，不再叠 SoundPlayer；
+ *   显式配置 soundFile 时才静音通知 + SoundPlayer 播自定义文件；
+ *   sound=false 全静音；notifySend=false（无通知面承载系统音）时
+ *   SoundPlayer 退回平台默认 wav。
  *
  * 平台后端（platform: auto 按宿主 OS 选择，可显式指定）：
  *   linux   notify-send 桌面通知 / paplay 提示音；自定义命令经 /bin/sh -c
@@ -81,6 +89,8 @@ export interface Config {
     deepLinkHash: string;
     notifyActivateActions: boolean;
     terminalNotifierPath: string;
+    windowsClickMode: 'auto' | 'balloon' | 'toast';
+    balloonWaitMs: number;
     presenceTimeoutMs: number;
     appName: string;
     expireMs: number;
@@ -97,12 +107,21 @@ export interface Config {
 export declare const Config: Schema<Config>;
 /**
  * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
- * 恒定 <audio silent="true"/>：toast 自带默认系统音必须显式静音，平台
- * 唯一音源是 sound 通道（SoundPlayer）——否则两声叠加成双音效。
+ * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
+ * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
+ * 承载，或 sound=false）。
  */
-export declare function buildToastScript(title: string, body: string, launchUrl?: string): string;
+export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent'): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export declare function buildMacNotifyScript(title: string, body: string): string;
+/**
+ * Windows NotifyIcon balloon 通知脚本（导出供测试在真实 PowerShell 下验证）。
+ * shell 把 BalloonTip 提升为 toast 显示；点击路由回 NotifyIcon（Win10/11
+ * 兼容行为）→ POST clickUrl {sessionId} → 响应 {open:true}（无在线页面）
+ * 或网络失败时 Start-Process 深链兜底。进程驻留至多 waitSeconds 等
+ * 点击（DoEvents 消息泵），超时静默退出。
+ */
+export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string;
 /** Windows 提示音脚本（导出供测试验证）。 */
 export declare function buildSoundScript(file: string): string;
 /** -EncodedCommand 编码（UTF-16LE base64）。 */

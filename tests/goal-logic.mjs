@@ -164,6 +164,48 @@ assert.equal(h2result.code, 200, '超时空返回也是 200')
 assert.equal(JSON.parse(h2result.body).entries.length, 0, '空返回应无条目')
 console.log('FOCUS-HOLD-OK：空轮询挂起 ' + (Date.now() - t0) + 'ms 后空返回')
 
+// H3: balloon 点击回调端点 POST /turn-notify/click
+const clickHandler = routes.get('/turn-notify/click')
+assert.ok(typeof clickHandler === 'function', 'click 路由应已注册')
+const postJson = (handler, obj) => {
+  const { res, done } = makeRes()
+  const chunks = []
+  let endFn = null
+  let errFn = null
+  const emitter = { on(ev, fn) { if (ev === 'data') chunks.push(fn); if (ev === 'end') endFn = fn; if (ev === 'error') errFn = fn; return this } }
+  const p = Promise.resolve(handler(emitter, res))
+  return (async () => {
+    await sleep(0)
+    for (const fn of chunks) fn(Buffer.from(JSON.stringify(obj)))
+    if (endFn) endFn()
+    await p
+    return await done
+  })()
+}
+// 无在线 presence（H2 的 wait 已超过 presenceTimeoutMs=600ms 前）→ open:true
+await sleep(700)
+const click1 = await postJson(clickHandler, { sessionId: 'sim-click-1' })
+assert.equal(click1.code, 200, 'click 应回 200')
+assert.equal(JSON.parse(click1.body).open, true, '无在线页面时 open=true（调用方需深链开浏览器）')
+// 注册 presence（一次 wait 到达）→ open:false 且入队（后续 wait 可取到条目）
+// since 用当前已入队最大 seq（H1 的 1 + click1 的 2）：既无待取条目可挂起，
+// 唤醒过滤（seq > since）也能带回 click 的新条目
+const keepAlive3 = setInterval(() => {}, 1000)
+const h3 = makeRes()
+void Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t2&since=2' }, h3.res)).then(() => h3.done)
+await sleep(150)
+const click2 = await postJson(clickHandler, { sessionId: 'sim-click-2' })
+assert.equal(JSON.parse(click2.body).open, false, '页面在线时 open=false（已开页面原地切换，零新标签页）')
+const h3result = await Promise.race([h3.done, sleep(3000).then(() => null)])
+clearInterval(keepAlive3)
+assert.ok(h3result !== null, 'click 入队应唤醒挂起的 wait')
+const clickEntries = JSON.parse(h3result.body).entries
+assert.ok(clickEntries.some((e) => e.sessionId === 'sim-click-2'), '唤醒条目应含 click 的会话')
+// 非法 body → open:true 兜底
+const click3 = await postJson(clickHandler, {})
+assert.equal(JSON.parse(click3.body).open, true, '非法 body open=true 兜底（调用方开深链）')
+console.log('CLICK-ROUTE-OK：在线 open=false 入队唤醒 / 离线 open=true / 非法兜底')
+
 console.log('--- F: 恢复会话标题读穿（服务折叠兜底）---')
 const agent2 = { session: { id: 'sim-session-2', header: {} } }
 const sess2 = agent2.session

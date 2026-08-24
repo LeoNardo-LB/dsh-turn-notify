@@ -52,8 +52,8 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 
 | 通道 | 默认 | Linux | macOS | Windows |
 |---|---|---|---|---|
-| notifySend | 开 | notify-send | osascript | PowerShell WinRT Toast |
-| sound | 开 | paplay | afplay | PowerShell SoundPlayer |
+| notifySend | 开 | notify-send | osascript | balloon（auto）/ WinRT Toast |
+| sound | 开 | paplay | afplay | 系统通知音（默认）/ SoundPlayer |
 | bell | 关 | ASCII BEL | ASCII BEL | ASCII BEL |
 | command | 关 | /bin/sh -c | /bin/sh -c | cmd /c |
 
@@ -62,8 +62,10 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
   （占位符同上；高级用法，如自定义通知客户端）。
 - `appName`（默认 dsh）：linux 通知归属应用名。
 - `expireMs`（默认 4000）：linux 通知超时；macos/win 不支持则忽略。
-- `soundFile`：留空 = 平台默认（linux freedesktop bell.oga /
-  macos Glass.aiff / windows Windows Notify.wav）。
+- `soundFile`：留空 = 平台默认音——linux freedesktop bell.oga /
+  macos Glass.aiff；**windows = 通知自带的系统通知音（单音源，不额外
+  发声）**。显式配置文件时 windows 会静音通知、用 SoundPlayer 播该文件
+  （此时点击机制自动落到 toast 模式，见 `windowsClickMode`）。
 - `notifyOnQuestion`（默认开）+ `questionTitleTemplate` /
   `questionBodyTemplate` / `questionSoundFile`：提问通知开关与
   内容/音效（见上节）。
@@ -145,21 +147,33 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
   该轮询同时就是 presence：到达即记为“页面已开”。
 - **POST `/turn-notify/focus`**：深链落地页广播聚焦（让其它已开标签页
   同步切换）。
+- **POST `/turn-notify/click`**：balloon 点击回调入口（Windows）——
+  入队聚焦 + 响应 `{open}`：页面在线 `false`（已开页面原地切换，
+  零新标签页）；离线 `true`（回调进程 Start-Process 深链开浏览器）。
 
 平台点击路径：
 
 - **Linux**（`notify-send -A` 进程内回调）：页面在线（长轮询新鲜，
   < `presenceTimeoutMs` 默认 15s）→ 入队分发已开页面，**零浏览器
   启动、不重复开标签页**；离线 → xdg-open 深链新开浏览器。
-- **Windows / macOS**：toast protocol launch / terminal-notifier `-open`
-  的点击 = 系统直接用浏览器打开深链 URL——**没有进程内回调通道**，
-  浏览器已开时平台行为就是新开一个标签页（浏览器平台限制，非插件
-  行为）。落地页读 `#dsh-focus=<sessionId>` 聚焦正确会话（带会话
-  列表竞态重试：新页列表异步晚到，`open` 对未列出会话抛错，
-  250ms 重试至列表到达、至多 15s），并 POST 广播让其它标签页同步切换。
-- **Windows toast 恒定 `<audio silent="true"/>`**：toast 自带默认系统音
-  显式静音，平台唯一音源是 sound 通道（SoundPlayer）——否则两声
-  叠加成双音效。
+- **Windows**（`windowsClickMode: auto`，默认）：页面在线 → **NotifyIcon
+  balloon**（shell 提升为 toast 显示，点击路由回 NotifyIcon——Win10/11
+  兼容行为）→ POST click 端点 → 已开页面原地切换，**零新标签页**；
+  页面离线 → WinRT toast protocol launch，点击 = 系统用浏览器打开深链。
+  `balloon` 恒用 balloon；`toast` 恒用 protocol launch（配置自定义
+  soundFile 时自动落到 toast——balloon 的系统音不可静音/替换）。
+  balloon 点击路由行为**待真机验证**（机制为 Win10/11 的 balloon
+  兼容提升；若个别环境不路由，置 `windowsClickMode: 'toast'` 退回）。
+- **macOS**：terminal-notifier `-open` 的点击 = 系统直接用浏览器打开
+  深链 URL（无进程回调）。落地页读 `#dsh-focus=<sessionId>` 聚焦正确
+  会话（带会话列表竞态重试：新页列表异步晚到，`open` 对未列出会话
+  抛错，250ms 重试至列表到达、至多 15s），并 POST 广播让其它标签页
+  同步切换（Windows toast 模式的落地页同此）。
+
+Windows 音效（单音源原则，默认 = 系统通知音）：默认（soundFile 留空）
+用通知自带的系统通知音，不再叠 SoundPlayer；显式配置 soundFile 时才
+静音通知 + SoundPlayer 播自定义文件；`sound: false` 全静音（balloon
+尽力用无图标模式，toast 精确 `<audio silent="true"/>`）。
 
 点击跳转的真机校验工具（CI 无法覆盖最后一环——runner 无桌面通知环境）：
 
@@ -174,10 +188,11 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
   默认浏览器打开深链，监听器收到即 PASS。
 
 验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真 + 聚焦通道路由级
-长轮询验证，任意平台）、`node tests/client-logic.mjs`（浏览器端逻辑：
-深链聚焦重试 / 长轮询消费 / 广播——直接驱动构建产物）、
-`node tests/windows-pwsh.mjs [powershell/pwsh]`（Windows 路径，含 toast
-静音断言）、`node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
+验证：长轮询挂起/唤醒、balloon click 端点 open 语义，任意平台）、
+`node tests/client-logic.mjs`（浏览器端逻辑：深链聚焦重试 / 长轮询消费 /
+广播——直接驱动构建产物）、`node tests/windows-pwsh.mjs [powershell/pwsh]`
+（Windows 路径：toast 音源断言 + balloon 脚本解析/编码往返/关键内容）、
+`node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
 
 包入口是编译产物 `lib/index.js`（Node 拒绝对 node_modules 下的 .ts 做
 类型剥离，真实安装必须携带 JS；产物随仓库提交，git 安装即装即用、
@@ -201,12 +216,21 @@ pnpm test             # goal 判别逻辑仿真测试
   要另听 session/event 的 turn/end。
 - pre-release 的 dsh 对事件面无兼容承诺；事件名/形状变更需跟进适配。
 - 长轮询时序边界：页面开着但轮询刚中断（如系统睡眠唤醒瞬间）会被判为
-  未开 → Linux 深链新开一个标签页（同样定位到目标会话，之后恢复复用路径）。
-- **Windows/macOS 浏览器已开时，点击通知必然新开一个标签页**（浏览器
-  打开 URL 的平台行为，无原生 helper 无法拦截）；落地页聚焦正确会话、
-  其它已开标签页同步切换。Linux 不受此限（进程内回调 + 长轮询复用）。
-- 复用路径切换会话后不强制置前浏览器窗口（浏览器禁止无手势的前台抢占）；
-  通知点击本身在多数桌面环境会带出浏览器，个别情况需手动切到浏览器。
+  未开 → Linux/Windows(balloon) 深链新开一个标签页（同样定位到目标
+  会话，之后恢复复用路径）。
+- **Windows balloon 点击路由待真机验证**（shell 对 BalloonTip 的
+  toast 提升与点击回传是 Win10/11 兼容行为）；不可靠时置
+  `windowsClickMode: 'toast'` 退回 protocol launch——此时浏览器已开
+  则点击必然新开一个标签页（浏览器打开 URL 的平台行为）。
+- balloon 进程驻留至多 `balloonWaitMs`（默认 30s）；超时后卡片可能
+  仍在通知中心，但其后点击无效果。balloon 的系统音不可静音/替换
+  （要自定义音效请配 soundFile，自动落 toast 模式）。
+- **macOS 浏览器已开时，点击通知必然新开一个标签页**（terminal-notifier
+  点击=系统用浏览器打开深链，无进程回调）；落地页聚焦正确会话、其它
+  已开标签页同步切换。Linux/Windows(balloon) 不受此限。
+- 复用路径切换会话后不强制置前浏览器窗口（浏览器禁止无手势的前台抢占）;
+  balloon/notify-send 点击本身在多数桌面环境会带出浏览器，个别情况需
+  手动切到浏览器。
 - 多标签页同源都会收到聚焦条目并切换（有意的收敛语义：无论最后看哪个
   标签页，都在正确会话上）。
 
