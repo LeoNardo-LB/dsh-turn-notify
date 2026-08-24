@@ -30,6 +30,12 @@ interface SessionsLike {
 
 export const inject = ['sessions']
 
+/** 构建期注入的插件版本（scripts/build-client.mjs define；缺省 unknown）。 */
+declare const __TN_VERSION__: string | undefined
+
+/** 版本字符串（tsc 直跑等未注入场景退回 unknown）。 */
+const TN_VERSION: string = typeof __TN_VERSION__ === 'string' ? __TN_VERSION__ : 'unknown'
+
 /** 深链 hash 前缀（与服务端 deepLinkHash 配置一致）。 */
 export const FOCUS_HASH_PREFIX = '#dsh-focus='
 
@@ -41,7 +47,8 @@ const RETRY_MAX = 60
 const POLL_ERROR_BACKOFF_MS = 2000
 
 export function apply(ctx: ClientContext): void {
-  const log = (...a: unknown[]) => console.log('[turn-notify/client]', ...a)
+  // 每行前缀带版本（与宿主端一致，调试时任意一行可识别版本）
+  const log = (...a: unknown[]) => console.log('[turn-notify/client v' + TN_VERSION + ']', ...a)
 
   const sessions = ctx.sessions as SessionsLike
   let stopped = false

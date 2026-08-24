@@ -23,6 +23,10 @@ function loadBundle(env) {
     location: { hash: env.hash ?? '', pathname: '/', search: '' },
     focus: env.windowFocus ?? (() => {}),
   }
+  const consoleLines = []
+  const captureConsole = {
+    log: (...a) => { consoleLines.push(a.map(String).join(' ')) },
+  }
   const g = {
     window,
     history: { replaceState: env.replaceState ?? (() => {}) },
@@ -30,7 +34,7 @@ function loadBundle(env) {
     fetch: env.fetch,
     setTimeout, clearTimeout,
     BroadcastChannel: undefined,
-    console,
+    console: env.captureConsole ? captureConsole : console,
   }
   g.window.__ModuleLoader__ = {
     load(record) { mod = record.factory(() => { throw new Error('unexpected external require') }) },
@@ -53,18 +57,26 @@ function loadBundle(env) {
     effect(fn2) { disposers.push(fn2); return () => {} },
   }
   mod.apply(ctx)
-  return { window, opened, dispose: () => { for (const d of disposers) d() } }
+  return { window, opened, consoleLines, dispose: () => { for (const d of disposers) d() } }
 }
 
 // ---- 1) 深链聚焦重试：列表 300ms 后才含目标会话 ----
 console.log('--- 1) 深链聚焦：列表未到 → 重试到成功 ---')
 {
   let listReady = false
-  const { opened, dispose } = loadBundle({
+  const { opened, consoleLines, dispose } = loadBundle({
     hash: '#dsh-focus=' + encodeURIComponent('sess-target-1'),
     isListed: (id) => listReady || id === 'sess-home',
     fetch: async (url, opts) => ({ ok: true, json: async () => ({ entries: [] }) }),
+    captureConsole: true,
   })
+  // 版本日志（v0.2.2-dev.8+）：客户端每行前缀 [turn-notify/client v<版本>]，
+  // 版本经 esbuild define 构建期内联（浏览器端读不到 package.json）
+  const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+  assert.ok(
+    consoleLines.some((l) => l.includes('[turn-notify/client v' + pkgVersion + ']') && l.includes('loaded')),
+    '客户端 loaded 行前缀应带版本 ' + pkgVersion + '（实际：' + (consoleLines[0] ?? '(无)') + '）',
+  )
   await sleep(100)
   assert.equal(opened.length, 0, '列表未含目标会话时不得提前成功')
   listReady = true

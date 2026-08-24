@@ -470,7 +470,8 @@ function runShellCommand(platform: Platform | undefined, cmd: string, onFail: (m
 
 export function apply(ctx: Context, config: Config) {
   const platform = detectPlatform(config.platform)
-  const log = (...a: unknown[]) => console.log('[turn-notify]', ...a)
+  // 每行前缀带版本：调试时任意一行日志即可识别运行版本（含用户回报）
+  const log = (...a: unknown[]) => console.log('[turn-notify v' + PKG_VERSION + ']', ...a)
   const failedOnce = new Set<string>()
   const warnOnce = (channel: string, msg: string) => {
     if (failedOnce.has(channel)) return
@@ -928,7 +929,7 @@ export function apply(ctx: Context, config: Config) {
     notify()
   })
 
-  log('loaded; v' + PKG_VERSION + ' platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
+  log('loaded; platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
     notifySend: config.notifySend, sound: config.sound, bell: config.bell,
     command: config.command ? '(custom)' : '(off)', rootOnly: config.rootOnly,
     questionChars: config.questionChars, skipGoalRounds: config.skipGoalRounds,

@@ -48,8 +48,21 @@ const config = {
   minRunMs: 0,
   presenceTimeoutMs: 600, // → pollHoldMs=300ms：H2 空轮询挂起时长短且确定
 }
+// 版本日志（v0.2.2-dev.8+）：每行前缀 [turn-notify v<版本>]——任意一行
+// 日志即可识别运行版本。捕获 apply 期间的 loaded 行做断言。
+const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+const captured = []
+const origLog = console.log
+console.log = (...a) => { captured.push(a.map(String).join(' ')); origLog(...a) }
 ctx.plugin(plugin, config)
+// cordis 的 apply 经 fiber 异步执行（探针实测 loaded 行 ~50ms 内打印），
+// 捕获窗口必须覆盖等待期——restore 放在 sleep 之后
 await sleep(150) // 等 apply 注册完监听再发事件
+console.log = origLog
+assert.ok(
+  captured.some((l) => l.includes('[turn-notify v' + pkgVersion + ']') && l.includes('loaded;')),
+  '启动 loaded 行前缀应带插件版本 ' + pkgVersion + '（实际：' + (captured.find((l) => l.includes('loaded')) ?? '(无)') + '）',
+)
 
 const agent = { session: { id: 'sim-session-1', header: {} } }
 const sess = agent.session
