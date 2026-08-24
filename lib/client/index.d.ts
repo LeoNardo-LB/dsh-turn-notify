@@ -5,8 +5,10 @@
  *   1. 长轮询 GET /turn-notify/focus-wait?client=<uuid>&since=<seq>：
  *      页面打开期间持续保持一个挂起请求；点击通知 → 服务端入队 →
  *      挂起请求立即返回 {entries:[{seq,sessionId}]} → 本页切换会话。
- *      该轮询同时就是 presence：服务端据此判定“页面已开”，Linux 上
- *      点击复用已开页面、零浏览器启动。
+ *      该轮询同时就是 presence：服务端据此判定“页面已开”（Linux 点击
+ *      复用已开页面；Windows 据此选 balloon 复用路径）。成功续接不走
+ *      setTimeout——Chrome 对后台标签页的 timer 钳制（后台 5 分钟后低
+ *      至 1 次/分钟）会让点击聚焦迟到最多一分钟，网络响应回调不受钳制。
  *   2. 深链兜底：页面未开时宿主经 OS 深链新开（#dsh-focus=<sessionId>，
  *      Windows toast / macOS terminal-notifier 的点击即此路径），本页读
  *      hash 聚焦会话，并 POST /turn-notify/focus 广播让其它已开标签页

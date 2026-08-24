@@ -1,5 +1,5 @@
 /**
- * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.2.0
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）
  *
  * 两类通知：
  *   A 提问通知（默认关，notifyOnQuestion 开启）：真人提问进入会话时
@@ -109,6 +109,7 @@ export interface Config {
   windowsClickMode: 'auto' | 'balloon' | 'toast'
   balloonWaitMs: number
   windowsToastAumid: 'auto' | 'powershell'
+  /** 轮询挂起时长与在线判定阈值（毫秒）。 */
   presenceTimeoutMs: number
   appName: string
   expireMs: number
@@ -156,7 +157,7 @@ export const Config: Schema<Config> = Schema.object({
     Schema.const('auto' as const).description('以自有 AUMID 直接发送（零文件），通知归属显示 dsh'),
     Schema.const('powershell' as const).description('恒用系统 PowerShell 的 AUMID（旧行为：通知归属显示 Windows PowerShell）'),
   ]).default('auto').description('Windows toast 的 AppUserModelID（通知归属/品牌显示）'),
-  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒），仅在发起通知时辅助选 balloon/toast；点击时刻的在线判定用瞬时真值（当下是否有挂起的 focus-wait 长轮询）'),
+  presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值与 focus-wait 挂起时长基准（挂起 = 该值一半，夹在 0.5–10s）：发起通知时辅助选 balloon/toast；点击时刻的在线判定用瞬时真值（当下是否有挂起的长轮询）'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -665,7 +666,11 @@ export function apply(ctx: Context, config: Config) {
     }, 'turn-notify: focus routes')
   })
 
-  /** 发起通知时的在线预判：瞬时真值优先，时间窗兜底（选 balloon/toast 用）。 */
+  /**
+   * 发起通知时的在线预判（选 balloon/toast 用）：瞬时真值（挂起中的
+   * 长轮询）优先；时间窗兜底覆盖页面恰好处于两轮询间隙的抖动——否则
+   * 会无谓地降级到 toast 深链模式（点击必开新标签页）。
+   */
   const presenceLikelyOnline = (): boolean => focusWaiters.size > 0 || presenceFresh()
 
   /**

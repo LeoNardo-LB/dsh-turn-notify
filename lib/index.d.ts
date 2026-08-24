@@ -1,5 +1,5 @@
 /**
- * dsh-turn-notify — 轮次通知插件（DSH bundle）· v0.2.0
+ * dsh-turn-notify — 轮次通知插件（DSH bundle）
  *
  * 两类通知：
  *   A 提问通知（默认关，notifyOnQuestion 开启）：真人提问进入会话时
@@ -92,6 +92,7 @@ export interface Config {
     windowsClickMode: 'auto' | 'balloon' | 'toast';
     balloonWaitMs: number;
     windowsToastAumid: 'auto' | 'powershell';
+    /** 轮询挂起时长与在线判定阈值（毫秒）。 */
     presenceTimeoutMs: number;
     appName: string;
     expireMs: number;
