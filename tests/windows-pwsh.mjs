@@ -12,7 +12,7 @@
 // 用法：node tests/windows-pwsh.mjs [powershell/pwsh 路径]
 import { Context } from '@deepseek-ai/cordis'
 import * as plugin from '../lib/index.js'
-const { buildToastScript, buildBalloonScript, buildEnsureAumidScript, buildSoundScript, encodePs } = plugin
+const { buildToastScript, buildBalloonScript, buildSetProcessAumidScript, buildSoundScript, encodePs } = plugin
 import { strict as assert } from 'node:assert'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -74,34 +74,32 @@ const decodedSilent = Buffer.from(encodePs(buildToastScript('T', 'B', undefined,
 assert.ok(decodedSilent.includes('<audio silent="true"/>'), "audio='silent' 必须显式静音（自定义 soundFile / sound=false）")
 assert.ok(!decodedSilent.includes('activationType'), 'silent 无深链组合合法')
 
-// AUMID 品牌（v0.2.2-dev.9）：默认 PowerShell AUMID（$tnAumid 变量注入）；
-// aumidSetup 注入自有 AUMID 注册脚本（开始菜单 dsh.lnk + 属性存储写入，
-// 写入成功即信任——Get-StartApps 校验已移除：shell 对新快捷方式的索引
-// 延迟会让校验长期失败、永远回退 PowerShell AUMID，真机已踩坑）。
-// 成功后同时设置进程显式 AUMID（balloon 提升的 toast 归属同样变 dsh）。
-assert.ok(decodedPlain.includes("$tnAumid = '{1AC14E77"), '默认 AUMID = PowerShell（可靠显示兜底）')
-assert.ok(decodedPlain.includes('CreateToastNotifier($tnAumid)'), 'toast 经 $tnAumid 变量选择归属')
-const DSH_AUMID = 'LeoNardo-LB.dsh-turn-notify'
-const ensure = buildEnsureAumidScript(DSH_AUMID)
-assert.ok(!ensure.includes('Get-StartApps'), '注册脚本不再依赖 Get-StartApps（索引延迟导致品牌永不生效的根因）')
-assert.ok(ensure.includes("$tnAumidOk = $false"), '注册脚本定义成功标志（失败保持回退）')
-const branded = buildToastScript('T', 'B', launchUrl, 'system', ensure)
-assert.ok(branded.includes("$tnAumid = '{1AC14E77"), '品牌 toast 仍以 PowerShell AUMID 为初值（注册失败兜底）')
-assert.ok(branded.includes("$lnk = Join-Path $env:APPDATA 'Microsoft"), '注册脚本创建开始菜单快捷方式')
-assert.ok(branded.includes('AumidHelper'), '注册脚本含属性存储 P/Invoke')
-assert.ok(branded.includes('9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3'), 'AUMID 属性键 GUID（System.AppUserModel.ID pid=5）')
-assert.ok(branded.includes('SetShortcutAumid($lnk, $tnDshAumid)'), '属性写入（幂等，成功即信任）')
-assert.ok(branded.includes('SetProcessAumid($tnDshAumid)'), '进程显式 AUMID 同步设置（balloon 归属）')
-assert.ok(branded.includes("$tnAumid = $tnDshAumid"), '写入成功才改写归属（失败保持回退）')
-const out5 = check(encodePs(branded))
+// AUMID 品牌（v0.2.2-dev.10）：零文件方案——toast 直接以 DSH_AUMID 发出
+// （未注册 AUMID 的显示名即字符串本身，显示 dsh）；balloon 经进程显式
+// AUMID。早期"开始菜单 dsh.lnk（目标 powershell -WindowStyle Hidden）"
+// 的注册方案与 LNK 木马投放器特征一致，被杀软按 HEUR:Trojan/LNK.Agent.b
+// 正确地启发式报毒——已彻底移除。无文件回归锁：任何脚本不得包含
+// 快捷方式/开始菜单/属性存储写入痕迹。
+const DSH_AUMID = 'dsh'
+const ALL_SCRIPTS = () => [decodedPlain, decodedClick, branded(), balloonBranded()]
+const branded = () => buildToastScript('T', 'B', launchUrl, 'system', DSH_AUMID)
+const balloonBranded = () => buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 300, true, buildSetProcessAumidScript(DSH_AUMID))
+for (const s of [decodedPlain, decodedClick, branded(), balloonBranded()]) {
+  assert.ok(!s.includes('Start Menu'), '无文件回归锁：不得触碰开始菜单（杀软 LNK 启发式误报源）')
+  assert.ok(!s.includes('WScript.Shell'), '无文件回归锁：不得创建快捷方式')
+  assert.ok(!s.includes('.lnk'), '无文件回归锁：不得引用 .lnk')
+  assert.ok(!s.includes('SHGetPropertyStoreFromParsingName'), '无文件回归锁：不得写属性存储')
+}
+assert.ok(decodedPlain.includes("CreateToastNotifier('{1AC14E77"), '未传 aumid 时默认 PowerShell AUMID（可靠显示兜底）')
+assert.ok(branded().includes("CreateToastNotifier('" + DSH_AUMID + "')"), '品牌 toast 直接以自有 AUMID 发出（显示 dsh）')
+const out5 = check(encodePs(branded()))
 console.log(out5.split('\n')[0])
-assert.ok(out5.includes('PARSE-OK'), '品牌 toast（含 C# here-string）语法零错误')
-// balloon 同样注入品牌 setup（提升后的 toast 归属 dsh）
-const balloonBranded = buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 300, true, ensure)
-assert.ok(balloonBranded.includes('SetProcessAumid($tnDshAumid)'), 'balloon 注册脚本设置进程 AUMID')
-assert.ok(balloonBranded.indexOf('SetProcessAumid') < balloonBranded.indexOf('New-Object System.Windows.Forms.NotifyIcon'), '进程 AUMID 必须在 NotifyIcon 创建前设置')
-const out6 = check(encodePs(balloonBranded))
-assert.ok(out6.includes('PARSE-OK'), '品牌 balloon 脚本语法零错误')
+assert.ok(out5.includes('PARSE-OK'), '品牌 toast 语法零错误')
+// balloon：进程 AUMID 设置脚本（提升后的 toast 归属 dsh）
+assert.ok(balloonBranded().includes('SetCurrentProcessExplicitAppUserModelID'), 'balloon 设置进程显式 AUMID')
+assert.ok(balloonBranded().indexOf('SetCurrentProcessExplicitAppUserModelID') < balloonBranded().indexOf('New-Object System.Windows.Forms.NotifyIcon'), '进程 AUMID 必须在 NotifyIcon 创建前设置')
+const out6 = check(encodePs(balloonBranded()))
+assert.ok(out6.includes('PARSE-OK'), '品牌 balloon 脚本（含 P/Invoke here-string）语法零错误')
 
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)

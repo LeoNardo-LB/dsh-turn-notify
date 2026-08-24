@@ -153,7 +153,7 @@ export const Config: Schema<Config> = Schema.object({
   ]).default('auto').description('Windows 点击回调机制（balloon 的系统音不可静音/替换，配置 soundFile 时自动落到 toast）'),
   balloonWaitMs: Schema.number().default(300000).description('Windows balloon 等待点击的时长（毫秒，默认 5 分钟）：进程驻留监听点击；超时退出后通知中心里的卡片成死卡片（点击无效果）。每次通知一个驻留进程，按需调小'),
   windowsToastAumid: Schema.union([
-    Schema.const('auto' as const).description('注册自有 AUMID（开始菜单 dsh 快捷方式）并以 dsh 名义显示 toast；注册/校验失败自动回退 PowerShell AUMID'),
+    Schema.const('auto' as const).description('以自有 AUMID 直接发送（零文件），通知归属显示 dsh'),
     Schema.const('powershell' as const).description('恒用系统 PowerShell 的 AUMID（旧行为：通知归属显示 Windows PowerShell）'),
   ]).default('auto').description('Windows toast 的 AppUserModelID（通知归属/品牌显示）'),
   presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值（毫秒），仅在发起通知时辅助选 balloon/toast；点击时刻的在线判定用瞬时真值（当下是否有挂起的 focus-wait 长轮询）'),
@@ -184,11 +184,13 @@ const DEFAULT_SOUND: Record<Platform, string> = {
 const POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 
 /**
- * 自有 AUMID：通知归属显示 dsh（而非 Windows PowerShell）。需要开始菜单
- * 快捷方式承载（Windows 对非打包应用的 AUMID 显示名取自同名 .lnk），
- * buildEnsureAumidScript 负责创建并注册，失败自动回退 POWERSHELL_AUMID。
+ * 自有 AUMID：toast 归属直接显示该字符串（'dsh'），零注册零文件。
+ * 早期方案在开始菜单创建 dsh.lnk（目标 powershell -WindowStyle Hidden），
+ * 该模式与 LNK 木马投放器特征一致，被杀软按 HEUR:Trojan/LNK.Agent.b
+ * 正确地启发式报毒并删除——已彻底移除快捷方式路线；未注册 AUMID 的
+ * 显示名即 AUMID 字符串本身，故取短名 dsh。
  */
-const DSH_AUMID = 'LeoNardo-LB.dsh-turn-notify'
+const DSH_AUMID = 'dsh'
 
 /** 宿主 sessionTitle 服务的最小读取面（可选服务，未挂载时 ctx.get 返回 undefined）。 */
 interface TitleServiceLike {
@@ -273,120 +275,43 @@ function deepLinkUrl(config: Config, sessionId: string): string {
  * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
  * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
  * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
- * 承载，或 sound=false）。
- * 通知归属 AUMID 经 $tnAumid 变量注入（默认 PowerShell AUMID）；
- * aumidSetup 是插在其后的 PowerShell 片段（buildEnsureAumidScript 产物），
- * 可在显示前把 $tnAumid 改写为已验证的自有 AUMID（dsh 品牌）。
+ * 承载，或 sound=false）。归属 AUMID 直接决定显示名：默认 POWERSHELL_AUMID，
+ * 传 DSH_AUMID 则显示 dsh（未注册 AUMID 的显示名即字符串本身，零文件）。
  */
-export function buildToastScript(title: string, body: string, launchUrl?: string, audio: 'system' | 'silent' = 'system', aumidSetup = ''): string {
+export function buildToastScript(title: string, body: string, launchUrl?: string, audio: 'system' | 'silent' = 'system', aumid = POWERSHELL_AUMID): string {
   const launch = launchUrl === undefined ? '' : ' activationType="protocol" launch="' + xmlEscape(launchUrl) + '"'
   const audioEl = audio === 'silent' ? '<audio silent="true"/>' : ''
   const xml = '<toast' + launch + '><visual><binding template="ToastText02"><text id="1">' + xmlEscape(title) + '</text><text id="2">' + xmlEscape(body) + '</text></binding></visual>' + audioEl + '</toast>'
-  const lines = [
-    "$tnAumid = '" + POWERSHELL_AUMID + "'",
-    ...aumidSetup.split('\n').filter(l => l.length > 0),
+  return [
     '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
     '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null',
     '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
     "$xml.LoadXml(" + psSingle(xml) + ")",
     '$toast = New-Object Windows.UI.Notifications.ToastNotification $xml',
-    '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($tnAumid).Show($toast)',
-  ]
-  return lines.join('\n')
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + aumid + "').Show($toast)",
+  ].join('\n')
 }
 
 /**
- * 自有 AUMID 的注册脚本（导出供测试在真实 PowerShell 下解析验证）。
- * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式：
- * 无 dsh.lnk 则创建 → 经属性存储写入 System.AppUserModel.ID（幂等）→ 成功
- * 即信任（不再用 Get-StartApps 校验——shell 对新快捷方式的索引有延迟，
- * 严格校验会长期回退 PowerShell AUMID，真机表现为通知一直显示
- * Windows PowerShell）→ 成功后把当前进程的显式 AUMID 一并设置
- * （SetCurrentProcessExplicitAppUserModelID），balloon 提升的 toast 归属
- * 同样变为 dsh。全程 try/catch：任何失败只保持 $tnAumidOk=$false，
- * 调用方维持各自回退，不影响通知显示。
+ * 设置当前 PowerShell 进程显式 AUMID 的脚本（导出供测试解析验证）。
+ * balloon 经 shell 提升为 toast 后归属取自进程 AUMID——设置后显示 dsh。
+ * 一个 P/Invoke，不创建任何文件、不写注册表、无快捷方式（早期快捷方式
+ * 方案被杀软按 LNK 木马启发式报毒，已移除）。
  */
-export function buildEnsureAumidScript(aumid: string): string {
-  const csharp = [
+export function buildSetProcessAumidScript(aumid: string): string {
+  return [
+    'try {',
+    "  Add-Type -TypeDefinition @'",
     'using System;',
     'using System.Runtime.InteropServices;',
-    'namespace DshTurnNotify {',
-    '  public static class AumidHelper {',
-    '    [StructLayout(LayoutKind.Sequential)]',
-    '    public struct PROPERTYKEY { public Guid fmtid; public int pid; }',
-    '    [StructLayout(LayoutKind.Explicit)]',
-    '    public struct PROPVARIANT {',
-    '      [FieldOffset(0)] public ushort vt;',
-    '      [FieldOffset(8)] public IntPtr pointerValue;',
-    '    }',
-    '    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]',
-    '    public interface IPropertyStore {',
-    '      void GetCount(out uint propertyCount);',
-    '      void GetAt(uint propertyIndex, out PROPERTYKEY key);',
-    '      void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);',
-    '      void SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);',
-    '      void Commit();',
-    '    }',
-    '    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]',
-    '    public static extern void SHGetPropertyStoreFromParsingName(',
-    '      [MarshalAs(UnmanagedType.LPWStr)] string path,',
-    '      IntPtr bindContext,',
-    '      uint flags,',
-    '      ref Guid interfaceId,',
-    '      [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore);',
-    '    [DllImport("shell32.dll", PreserveSig = false)]',
-    '    public static extern void SetCurrentProcessExplicitAppUserModelID(',
-    '      [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId);',
-    '    static IPropertyStore Store(string shortcutPath) {',
-    '      Guid interfaceId = typeof(IPropertyStore).GUID;',
-    '      IPropertyStore store;',
-    '      SHGetPropertyStoreFromParsingName(shortcutPath, IntPtr.Zero, 0, ref interfaceId, out store);',
-    '      return store;',
-    '    }',
-    '    public static void SetShortcutAumid(string shortcutPath, string appUserModelId) {',
-    '      IPropertyStore store = Store(shortcutPath);',
-    '      PROPERTYKEY key = new PROPERTYKEY();',
-    '      key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");',
-    '      key.pid = 5;',
-    '      PROPVARIANT value = new PROPVARIANT();',
-    '      value.vt = 31;',
-    '      value.pointerValue = Marshal.StringToCoTaskMemUni(appUserModelId);',
-    '      try {',
-    '        store.SetValue(ref key, ref value);',
-    '        store.Commit();',
-    '      } finally {',
-    '        Marshal.FreeCoTaskMem(value.pointerValue);',
-    '        Marshal.ReleaseComObject(store);',
-    '      }',
-    '    }',
-    '    public static void SetProcessAumid(string appUserModelId) {',
-    '      SetCurrentProcessExplicitAppUserModelID(appUserModelId);',
-    '    }',
-    '  }',
+    '[DllImport("shell32.dll", PreserveSig = false)]',
+    'public static class DshTnAumid {',
+    '  [DllImport("shell32.dll", PreserveSig = false)]',
+    '  public static extern void SetCurrentProcessExplicitAppUserModelID(',
+    '    [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId);',
     '}',
-  ].join('\n')
-  return [
-    '$tnAumidOk = $false',
-    "$tnDshAumid = '" + aumid + "'",
-    'try {',
-    "  $lnk = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\dsh.lnk'",
-    '  if (-not (Test-Path $lnk)) {',
-    '    $ws = New-Object -ComObject WScript.Shell',
-    '    $sc = $ws.CreateShortcut($lnk)',
-    "    $sc.TargetPath = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
-    "    $sc.Arguments = '-NoProfile -WindowStyle Hidden -Command exit'",
-    "    $sc.Description = 'dsh turn-notify notification branding (AppUserModelID holder)'",
-    '    $sc.Save()',
-    '  }',
-    '  if (Test-Path $lnk) {',
-    "    Add-Type -TypeDefinition @'",
-    csharp,
     "'@",
-    '    [DshTurnNotify.AumidHelper]::SetShortcutAumid($lnk, $tnDshAumid)',
-    '    [DshTurnNotify.AumidHelper]::SetProcessAumid($tnDshAumid)',
-    '    $tnAumidOk = $true',
-    '    $tnAumid = $tnDshAumid',
-    '  }',
+    "  [DshTnAumid]::SetCurrentProcessExplicitAppUserModelID('" + aumid + "')",
     '} catch { }',
   ].join('\n')
 }
@@ -410,9 +335,9 @@ export function buildBalloonScript(title: string, body: string, sessionId: strin
   return [
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
-    // 品牌 setup（buildEnsureAumidScript 产物）：注册 dsh AUMID + 把本
-    // PowerShell 进程的显式 AUMID 设置为 dsh → 提升后的 toast 归属显示
-    // dsh（而非 Windows PowerShell）。失败保持 $tnAumidOk=$false，无副作用。
+    // 进程 AUMID setup（buildSetProcessAumidScript 产物）：balloon 提升
+    // 为 toast 后归属取自进程 AUMID——设置后显示 dsh。一个 P/Invoke，
+    // 不创建任何文件（快捷方式方案已因杀软 LNK 启发式误报移除）。
     ...aumidSetup.split('\n').filter(l => l.length > 0),
     '$clickUrl = ' + psSingle(clickUrl),
     '$deepLink = ' + psSingle(deepLink),
@@ -751,8 +676,11 @@ export function apply(ctx: Context, config: Config) {
       const wantBalloon = clickable && !customSound
         && (config.windowsClickMode === 'balloon'
           || (config.windowsClickMode === 'auto' && presenceLikelyOnline()))
-      // toast 的 AUMID 品牌 setup（windowsToastAumid=powershell 时不注入）
-      const aumidSetup = config.windowsToastAumid === 'auto' ? buildEnsureAumidScript(DSH_AUMID) : ''
+      // 归属品牌（零文件）：toast 直接以 DSH_AUMID 发出（显示名 = 'dsh'）；
+      // balloon 经进程 AUMID 设置。windowsToastAumid=powershell 时全部回退。
+      const branded = config.windowsToastAumid === 'auto'
+      const toastAumid = branded ? DSH_AUMID : POWERSHELL_AUMID
+      const aumidSetup = branded ? buildSetProcessAumidScript(DSH_AUMID) : ''
       if (wantBalloon) {
         const base = config.webUrl.replace(/\/$/, '')
         const script = buildBalloonScript(title, body, vars.sessionId, base + '/turn-notify/click', deepLinkUrl(config, vars.sessionId), Math.ceil(config.balloonWaitMs / 1000), config.sound, aumidSetup)
@@ -762,14 +690,14 @@ export function apply(ctx: Context, config: Config) {
           if (err !== null) {
             // balloon 失败（无桌面会话等）→ 降级 toast（无点击深链照发）
             const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
-            run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, 'system', aumidSetup))], (m) => warnOnce('windows-toast', m))
+            run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, 'system', toastAumid))], (m) => warnOnce('windows-toast', m))
           }
         })
         child.unref?.()
       } else {
         const launch = clickable ? deepLinkUrl(config, vars.sessionId) : undefined
         const audio = customSound || !config.sound ? 'silent' : 'system'
-        run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, audio, aumidSetup))], (m) => warnOnce('windows-toast', m))
+        run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(buildToastScript(title, body, launch, audio, toastAumid))], (m) => warnOnce('windows-toast', m))
       }
     } else {
       warnOnce('platform', '未知平台（process.platform=' + process.platform + '），只有 bell/command 通道可用')

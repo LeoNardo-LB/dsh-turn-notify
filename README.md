@@ -72,15 +72,17 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 
 Windows 实现注记：通知脚本经 PowerShell `-EncodedCommand`
 （UTF-16LE base64）投递，规避引号转义问题，零第三方依赖。通知归属
-（品牌显示）：`windowsToastAumid: auto`（默认）注册自有 AUMID
-（开始菜单 dsh 快捷方式 + System.AppUserModel.ID 属性存储写入，
-**写入成功即信任**）→ toast 以 **dsh** 名义显示；写入失败自动回退
-系统 PowerShell AUMID（保证通知中心可靠显示）。早期版本用
-Get-StartApps 做注册后校验——shell 对新快捷方式的索引有延迟，校验
-长期通不过导致品牌永不生效（真机踩坑），已移除。balloon 路径同样
-注入注册脚本并设置进程显式 AUMID
-（SetCurrentProcessExplicitAppUserModelID）→ 提升后的 toast 归属
-也是 dsh；注册失败时回退显示 Windows PowerShell。
+（品牌显示，**零文件方案**）：`windowsToastAumid: auto`（默认）直接
+以自有 AUMID（`dsh`）发送——未注册 AUMID 的显示名即字符串本身，
+toast/balloon 归属都显示 **dsh**，不创建任何文件。
+
+> ⚠️ 历史教训（dev.7–dev.9）：曾用"开始菜单 dsh.lnk（目标
+> powershell -WindowStyle Hidden）+ 属性存储写入"注册 AUMID——该
+> 模式与 LNK 木马投放器特征一致，被杀毒软件按
+> `HEUR:Trojan/LNK.Agent.b` 正确地启发式报毒并删除（且脚本会重建
+> 快捷方式，造成反复报毒）。已彻底移除；测试含无文件回归锁（任何
+> 通知脚本不得包含 Start Menu / WScript.Shell / .lnk / 属性存储写入）。
+> 曾装过 dev.7–dev.9 的机器：杀软已删掉该 lnk，无需其它清理。
 
 Windows 验证状态（Linux pwsh 7.4 + 官方 Parser 三层工装
 `tests/windows-pwsh.mjs`，CI 常跑）：编码往返无损（中日文/引号/
@@ -235,9 +237,8 @@ pnpm test             # goal 判别逻辑仿真测试
 - balloon 进程驻留 `balloonWaitMs`（默认 5 分钟，上限 1 小时，每次通知
   一个驻留 PowerShell 进程）；超时后通知中心里的残留卡片是死卡片
   （点击无效果）。balloon 的系统音不可静音/替换（要自定义音效请配
-  soundFile，自动落 toast 模式）；balloon 归属经进程显式 AUMID 同样
-  显示 dsh（注册失败回退 Windows PowerShell，见 `windowsToastAumid`
-  注记）。
+  soundFile，自动落 toast 模式）；balloon 归属经进程显式 AUMID 显示
+  dsh（见 `windowsToastAumid` 注记）。
 - **macOS 浏览器已开时，点击通知必然新开一个标签页**（terminal-notifier
   点击=系统用浏览器打开深链，无进程回调）；落地页聚焦正确会话、其它
   已开标签页同步切换。Linux/Windows(balloon) 不受此限。

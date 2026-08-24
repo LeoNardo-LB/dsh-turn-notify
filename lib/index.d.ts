@@ -110,24 +110,17 @@ export declare const Config: Schema<Config>;
  * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
  * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源
  * 原则的默认路径）；'silent' 显式静音（自定义 soundFile 由 SoundPlayer
- * 承载，或 sound=false）。
- * 通知归属 AUMID 经 $tnAumid 变量注入（默认 PowerShell AUMID）；
- * aumidSetup 是插在其后的 PowerShell 片段（buildEnsureAumidScript 产物），
- * 可在显示前把 $tnAumid 改写为已验证的自有 AUMID（dsh 品牌）。
+ * 承载，或 sound=false）。归属 AUMID 直接决定显示名：默认 POWERSHELL_AUMID，
+ * 传 DSH_AUMID 则显示 dsh（未注册 AUMID 的显示名即字符串本身，零文件）。
  */
-export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumidSetup?: string): string;
+export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumid?: string): string;
 /**
- * 自有 AUMID 的注册脚本（导出供测试在真实 PowerShell 下解析验证）。
- * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式：
- * 无 dsh.lnk 则创建 → 经属性存储写入 System.AppUserModel.ID（幂等）→ 成功
- * 即信任（不再用 Get-StartApps 校验——shell 对新快捷方式的索引有延迟，
- * 严格校验会长期回退 PowerShell AUMID，真机表现为通知一直显示
- * Windows PowerShell）→ 成功后把当前进程的显式 AUMID 一并设置
- * （SetCurrentProcessExplicitAppUserModelID），balloon 提升的 toast 归属
- * 同样变为 dsh。全程 try/catch：任何失败只保持 $tnAumidOk=$false，
- * 调用方维持各自回退，不影响通知显示。
+ * 设置当前 PowerShell 进程显式 AUMID 的脚本（导出供测试解析验证）。
+ * balloon 经 shell 提升为 toast 后归属取自进程 AUMID——设置后显示 dsh。
+ * 一个 P/Invoke，不创建任何文件、不写注册表、无快捷方式（早期快捷方式
+ * 方案被杀软按 LNK 木马启发式报毒，已移除）。
  */
-export declare function buildEnsureAumidScript(aumid: string): string;
+export declare function buildSetProcessAumidScript(aumid: string): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
 export declare function buildMacNotifyScript(title: string, body: string): string;
 /**
