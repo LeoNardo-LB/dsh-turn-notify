@@ -104,7 +104,11 @@ assert.ok(balloonBranded().indexOf('SetCurrentProcessExplicitAppUserModelID') < 
 const elseAt = balloonBranded().indexOf('} else {', balloonBranded().indexOf('Invoke-RestMethod'))
 assert.ok(elseAt > 0, 'open:false 走 else 分支（页面已开时的独立路径）')
 assert.ok(balloonBranded().indexOf('SetForegroundWindow') > elseAt, '前台置前在 open:false 分支内')
-assert.ok(balloonBranded().includes('UrlAssociations\\http\\UserChoice'), '经注册表读默认浏览器 ProgId')
+assert.ok(balloonBranded().includes('UrlAssociations\\http\\UserChoice'), '经注册表读默认浏览器 ProgId（运行时单反斜杠——经 node 运行时求值核验）')
+// 多窗口优选（dev.12）：优先置前标题含 DSH 标记的窗口（dsh 标签页为活动标签的窗口），
+// 否则多窗口时盲选第一个可能拉错窗口；含常见国产浏览器进程名
+assert.ok(balloonBranded().includes(String.raw`MainWindowTitle -like '*DSH*'`), '多窗口时优先标题含 DSH 的窗口')
+assert.ok(balloonBranded().includes('360se') && balloonBranded().includes('qqbrowser'), '浏览器扫描列表含常见国产浏览器')
 assert.ok(balloonBranded().includes('ShowWindow($win.MainWindowHandle, 9)'), '最小化窗口先恢复（SW_RESTORE）')
 assert.ok(balloonBranded().includes('keybd_event(0x12'), 'ALT 键技巧获取前台权限')
 const catchAt = balloonBranded().indexOf('} catch {', elseAt)

@@ -102,7 +102,16 @@ export function apply(ctx: ClientContext): void {
       /* 连接中断/服务重启：退避后重试 */
     }
     if (stopped) return
-    const timer = setTimeout(poll, ok ? 0 : POLL_ERROR_BACKOFF_MS)
+    // 成功续接不经过 setTimeout：Chrome 对后台标签页的 timer 有钳制
+    // （普通 1s、后台 5 分钟后密集钳制至 1 次/分钟）——点击条目若在轮询
+    // 间隙入队，要等被钳制的 timer 才能取到，迟到最多一分钟（dsh 页在后
+    // 台恰是最需要通知的场景）。网络响应回调不受钳制，同步直启零间隙；
+    // 服务端每次挂起 ~pollHoldMs，无热循环。
+    if (ok) {
+      void poll()
+      return
+    }
+    const timer = setTimeout(poll, POLL_ERROR_BACKOFF_MS)
     pollTimer.push(timer)
   }
   void poll()
@@ -124,6 +133,13 @@ export function apply(ctx: ClientContext): void {
         body: JSON.stringify({ sessionId }),
       }).catch(() => {}) // 广播失败不影响本页聚焦
     }
+  }
+
+  // ---- 3) 稳定标题标记：Windows 点击链路据此定位含 dsh 标签页的浏览器窗口 ----
+  // 置前脚本在多个浏览器窗口中优先选择标题含 " — DSH" 的那个（即 dsh
+  // 标签页为活动标签页的窗口）；标记追加一次，SPA 改标题可能覆盖，无碍。
+  if (!(document.title || '').includes(' — DSH')) {
+    document.title = (document.title || 'DSH') + ' — DSH'
   }
 
   log('loaded; client=' + clientId)

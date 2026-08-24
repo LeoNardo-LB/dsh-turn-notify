@@ -27,11 +27,18 @@ function loadBundle(env) {
   const captureConsole = {
     log: (...a) => { consoleLines.push(a.map(String).join(' ')) },
   }
+  // 假 fetch 先让出一轮事件循环（宏任务）再返回——真实网络至少跨一次
+  // 事件循环切换；瞬时返回会让零间隙续接轮询（成功路径不走 setTimeout，
+  // 防后台标签页 timer 钳制）在测试里饿死所有定时器。
+  const realisticFetch = async (...a) => {
+    await new Promise((r) => setTimeout(r, 0))
+    return env.fetch(...a)
+  }
   const g = {
     window,
     history: { replaceState: env.replaceState ?? (() => {}) },
     document: { title: 'DSH' },
-    fetch: env.fetch,
+    fetch: realisticFetch,
     setTimeout, clearTimeout,
     BroadcastChannel: undefined,
     console: env.captureConsole ? captureConsole : console,

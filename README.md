@@ -173,8 +173,9 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
   balloon**（shell 提升为 toast 显示，点击路由回 NotifyIcon——Win10/11
   兼容行为，真机已验证可路由）→ POST click 端点 → 已开页面原地切换
   （**零新标签页**）+ 点击进程把已有浏览器窗口**拉到前台**（注册表读
-  默认浏览器 → ShowWindow 恢复最小化 + SetForegroundWindow 置前，
-  best-effort——浏览器禁无手势抢前台，没有这步页面切了用户也看不到）；
+  默认浏览器，多窗口时优先标题含 " — DSH" 标记的窗口 → ShowWindow 恢复
+  最小化 + SetForegroundWindow 置前，best-effort——浏览器禁无手势抢
+  前台，没有这步页面切了用户也看不到）；
   页面离线 → WinRT toast protocol launch，点击 =
   系统用浏览器打开深链。`balloon` 恒用 balloon；`toast` 恒用
   protocol launch（配置自定义 soundFile 时自动落到 toast——balloon 的
@@ -246,8 +247,16 @@ pnpm test             # goal 判别逻辑仿真测试
   点击=系统用浏览器打开深链，无进程回调）；落地页聚焦正确会话、其它
   已开标签页同步切换。Linux/Windows(balloon) 不受此限。
 - 前台置前（Windows）：balloon 点击进程经 SetForegroundWindow 拉起
-  已开浏览器窗口（含 ALT 键技巧获取前台权限，best-effort）；个别
-  前台锁定策略下可能仍不置前——此时页面已切换，手动切到浏览器即就绪。
+  已开浏览器窗口（含 ALT 键技巧获取前台权限，best-effort；多窗口时
+  优先标题含 " — DSH" 标记的窗口——客户端插件会给页面标题追加该标记，
+  但仅当 dsh 标签页是其窗口的活动标签时才反映到窗口标题）；个别前台
+  锁定策略下可能仍不置前——此时页面已切换，手动切到浏览器即就绪。
+  浏览器**活动标签页**无法从外部切换（平台无此能力）：dsh 页在后台
+  标签时，置前的是浏览器窗口，需再点一下 dsh 标签。
+- 轮询抗后台钳制（dev.12+）：成功续接不走 setTimeout——Chrome 对后台
+  标签页的 timer 钳制（后台 5 分钟后低至 1 次/分钟）会让点击聚焦在
+  轮询间隙迟到最多一分钟（dsh 页在后台恰是最需要通知的场景）；网络
+  响应回调不受钳制，同步直启下一轮零间隙，服务端挂起时长天然限速。
   Linux/macOS 复用路径不置前（无等价手段）。
 - 多标签页同源都会收到聚焦条目并切换（有意的收敛语义：无论最后看哪个
   标签页，都在正确会话上）。
