@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@deepseek-ai/dsh-agent':
-        specifier: ^0.1.0-rc.6
+        specifier: '>=0.1.0-rc.6'
         version: 0.1.0-rc.6(9bf9d4243f80ccefce5042bed5cd4c17)
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
