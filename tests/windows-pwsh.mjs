@@ -83,7 +83,8 @@ assert.ok(!decodedSilent.includes('activationType'), 'silent 无深链组合合�
 const DSH_AUMID = 'dsh'
 const ALL_SCRIPTS = () => [decodedPlain, decodedClick, branded(), balloonBranded()]
 const branded = () => buildToastScript('T', 'B', launchUrl, 'system', DSH_AUMID)
-const balloonBranded = () => buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 300, true, buildSetProcessAumidScript(DSH_AUMID))
+const RAISE = plugin.buildRaiseBrowserScript()
+const balloonBranded = () => buildBalloonScript('T', 'B', 's', 'http://x/click', 'http://x/#dsh-focus=s', 300, true, buildSetProcessAumidScript(DSH_AUMID), RAISE)
 for (const s of [decodedPlain, decodedClick, branded(), balloonBranded()]) {
   assert.ok(!s.includes('Start Menu'), '无文件回归锁：不得触碰开始菜单（杀软 LNK 启发式误报源）')
   assert.ok(!s.includes('WScript.Shell'), '无文件回归锁：不得创建快捷方式')
@@ -98,8 +99,19 @@ assert.ok(out5.includes('PARSE-OK'), '品牌 toast 语法零错误')
 // balloon：进程 AUMID 设置脚本（提升后的 toast 归属 dsh）
 assert.ok(balloonBranded().includes('SetCurrentProcessExplicitAppUserModelID'), 'balloon 设置进程显式 AUMID')
 assert.ok(balloonBranded().indexOf('SetCurrentProcessExplicitAppUserModelID') < balloonBranded().indexOf('New-Object System.Windows.Forms.NotifyIcon'), '进程 AUMID 必须在 NotifyIcon 创建前设置')
+// 前台拉起（「点了没反应」修复回归锁）：open:false（页面已开原地切换）分支
+// 必须把已开浏览器窗口置前——浏览器禁无手势抢前台，没有这步用户看不到反应
+const elseAt = balloonBranded().indexOf('} else {', balloonBranded().indexOf('Invoke-RestMethod'))
+assert.ok(elseAt > 0, 'open:false 走 else 分支（页面已开时的独立路径）')
+assert.ok(balloonBranded().indexOf('SetForegroundWindow') > elseAt, '前台置前在 open:false 分支内')
+assert.ok(balloonBranded().includes('UrlAssociations\\http\\UserChoice'), '经注册表读默认浏览器 ProgId')
+assert.ok(balloonBranded().includes('ShowWindow($win.MainWindowHandle, 9)'), '最小化窗口先恢复（SW_RESTORE）')
+assert.ok(balloonBranded().includes('keybd_event(0x12'), 'ALT 键技巧获取前台权限')
+const catchAt = balloonBranded().indexOf('} catch {', elseAt)
+const elseBlock = balloonBranded().slice(elseAt, catchAt)
+assert.ok(!elseBlock.includes('Start-Process $deepLink'), 'else 分支不得开新标签页（复用语义；catch 网络失败兜底除外）')
 const out6 = check(encodePs(balloonBranded()))
-assert.ok(out6.includes('PARSE-OK'), '品牌 balloon 脚本（含 P/Invoke here-string）语法零错误')
+assert.ok(out6.includes('PARSE-OK'), '品牌 balloon 脚本（AUMID + 前台拉起 P/Invoke）语法零错误')
 
 const bEvil = encodePs(buildToastScript('TITLE"\'><&amp; 😡 \\', "Q\"'<>&\\ 注入"))
 const out2 = check(bEvil)
@@ -149,6 +161,7 @@ async function triggerPlugin() {
     titleTemplate: 'PARTICLE-TITLE 报告“完成”', bodyTemplate: '{question}', rootOnly: true,
     skipGoalRounds: true, goalQuietMs: 3000, fallbackTitle: 'DSH', fallbackMessage: '回复结束',
     questionChars: 200, minRunMs: 0,
+    balloonWaitMs: 3000, // CI 真机分支防 5 分钟驻留（无人点击， ballooning 进程按 3s 退出）
   })
   await sleep(150)
   const agent = { session: { id: 'win-sim-1', header: {} } }

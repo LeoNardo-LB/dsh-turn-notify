@@ -171,8 +171,11 @@ dev/beta 同号）。所有升版经 `scripts/version.sh dev|beta|stable` 完成
   xdg-open 深链新开浏览器。
 - **Windows**（`windowsClickMode: auto`，默认）：页面在线 → **NotifyIcon
   balloon**（shell 提升为 toast 显示，点击路由回 NotifyIcon——Win10/11
-  兼容行为，真机已验证可路由）→ POST click 端点 → 已开页面原地切换，
-  **零新标签页**；页面离线 → WinRT toast protocol launch，点击 =
+  兼容行为，真机已验证可路由）→ POST click 端点 → 已开页面原地切换
+  （**零新标签页**）+ 点击进程把已有浏览器窗口**拉到前台**（注册表读
+  默认浏览器 → ShowWindow 恢复最小化 + SetForegroundWindow 置前，
+  best-effort——浏览器禁无手势抢前台，没有这步页面切了用户也看不到）；
+  页面离线 → WinRT toast protocol launch，点击 =
   系统用浏览器打开深链。`balloon` 恒用 balloon；`toast` 恒用
   protocol launch（配置自定义 soundFile 时自动落到 toast——balloon 的
   系统音不可静音/替换）。
@@ -242,9 +245,10 @@ pnpm test             # goal 判别逻辑仿真测试
 - **macOS 浏览器已开时，点击通知必然新开一个标签页**（terminal-notifier
   点击=系统用浏览器打开深链，无进程回调）；落地页聚焦正确会话、其它
   已开标签页同步切换。Linux/Windows(balloon) 不受此限。
-- 复用路径切换会话后不强制置前浏览器窗口（浏览器禁止无手势的前台抢占）;
-  balloon/notify-send 点击本身在多数桌面环境会带出浏览器，个别情况需
-  手动切到浏览器。
+- 前台置前（Windows）：balloon 点击进程经 SetForegroundWindow 拉起
+  已开浏览器窗口（含 ALT 键技巧获取前台权限，best-effort）；个别
+  前台锁定策略下可能仍不置前——此时页面已切换，手动切到浏览器即就绪。
+  Linux/macOS 复用路径不置前（无等价手段）。
 - 多标签页同源都会收到聚焦条目并切换（有意的收敛语义：无论最后看哪个
   标签页，都在正确会话上）。
 

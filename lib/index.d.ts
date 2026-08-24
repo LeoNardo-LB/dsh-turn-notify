@@ -131,7 +131,17 @@ export declare function buildMacNotifyScript(title: string, body: string): strin
  * 点击（DoEvents 消息泵），超时静默退出。默认 5 分钟（通知中心里的
  * 卡片在进程退出后成为死卡片——点击无效果，故驻留要长）。
  */
-export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean, aumidSetup?: string): string;
+export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean, aumidSetup?: string, raiseScript?: string): string;
+/**
+ * 把已开的默认浏览器窗口拉到前台的脚本（导出供测试解析验证）。
+ * 页面内 sessions.open 已切换会话，但浏览器禁止无手势的 window.focus()
+ * 抢前台——用户看到"点了没反应"。此脚本由 balloon 点击进程执行（有点
+ * 击语境）：注册表读默认浏览器 ProgId → 定位其有窗口的进程 →
+ * ShowWindow(SW_RESTORE) 恢复最小化 + ALT 键技巧获得前台权限 +
+ * SetForegroundWindow/SwitchToThisWindow 置前。best-effort：失败不抛
+ * （页面切换已完成，用户手动切到浏览器时一切就绪）。
+ */
+export declare function buildRaiseBrowserScript(): string;
 /** Windows 提示音脚本（导出供测试验证）。 */
 export declare function buildSoundScript(file: string): string;
 /** -EncodedCommand 编码（UTF-16LE base64）。 */
