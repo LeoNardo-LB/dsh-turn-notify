@@ -296,12 +296,15 @@ export function buildToastScript(title: string, body: string, launchUrl?: string
 }
 
 /**
- * 自有 AUMID 的注册与校验脚本（导出供测试在真实 PowerShell 下解析验证）。
- * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式，
- * 故：无 dsh.lnk 则创建（目标为无害的隐藏 PowerShell 退出命令）→ 未在
- * Get-StartApps 列出则经属性存储写入 System.AppUserModel.ID → 最终仍
- * 未列出（注册失败/被清理）则不改写 $tnAumid（保持回退值 PowerShell
- * AUMID）。全程 try/catch：品牌注册任何失败都不影响通知显示本身。
+ * 自有 AUMID 的注册脚本（导出供测试在真实 PowerShell 下解析验证）。
+ * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式：
+ * 无 dsh.lnk 则创建 → 经属性存储写入 System.AppUserModel.ID（幂等）→ 成功
+ * 即信任（不再用 Get-StartApps 校验——shell 对新快捷方式的索引有延迟，
+ * 严格校验会长期回退 PowerShell AUMID，真机表现为通知一直显示
+ * Windows PowerShell）→ 成功后把当前进程的显式 AUMID 一并设置
+ * （SetCurrentProcessExplicitAppUserModelID），balloon 提升的 toast 归属
+ * 同样变为 dsh。全程 try/catch：任何失败只保持 $tnAumidOk=$false，
+ * 调用方维持各自回退，不影响通知显示。
  */
 export function buildEnsureAumidScript(aumid: string): string {
   const csharp = [
@@ -331,10 +334,17 @@ export function buildEnsureAumidScript(aumid: string): string {
     '      uint flags,',
     '      ref Guid interfaceId,',
     '      [MarshalAs(UnmanagedType.Interface)] out IPropertyStore propertyStore);',
-    '    public static void Set(string shortcutPath, string appUserModelId) {',
+    '    [DllImport("shell32.dll", PreserveSig = false)]',
+    '    public static extern void SetCurrentProcessExplicitAppUserModelID(',
+    '      [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId);',
+    '    static IPropertyStore Store(string shortcutPath) {',
     '      Guid interfaceId = typeof(IPropertyStore).GUID;',
     '      IPropertyStore store;',
     '      SHGetPropertyStoreFromParsingName(shortcutPath, IntPtr.Zero, 0, ref interfaceId, out store);',
+    '      return store;',
+    '    }',
+    '    public static void SetShortcutAumid(string shortcutPath, string appUserModelId) {',
+    '      IPropertyStore store = Store(shortcutPath);',
     '      PROPERTYKEY key = new PROPERTYKEY();',
     '      key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");',
     '      key.pid = 5;',
@@ -349,10 +359,15 @@ export function buildEnsureAumidScript(aumid: string): string {
     '        Marshal.ReleaseComObject(store);',
     '      }',
     '    }',
+    '    public static void SetProcessAumid(string appUserModelId) {',
+    '      SetCurrentProcessExplicitAppUserModelID(appUserModelId);',
+    '    }',
     '  }',
     '}',
   ].join('\n')
   return [
+    '$tnAumidOk = $false',
+    "$tnDshAumid = '" + aumid + "'",
     'try {',
     "  $lnk = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\dsh.lnk'",
     '  if (-not (Test-Path $lnk)) {',
@@ -363,15 +378,15 @@ export function buildEnsureAumidScript(aumid: string): string {
     "    $sc.Description = 'dsh turn-notify notification branding (AppUserModelID holder)'",
     '    $sc.Save()',
     '  }',
-    "  $listed = Get-StartApps | Where-Object { $_.AppID -eq '" + aumid + "' }",
-    '  if (-not $listed) {',
+    '  if (Test-Path $lnk) {',
     "    Add-Type -TypeDefinition @'",
     csharp,
     "'@",
-    "    [DshTurnNotify.AumidHelper]::Set($lnk, '" + aumid + "')",
-    "    $listed = Get-StartApps | Where-Object { $_.AppID -eq '" + aumid + "' }",
+    '    [DshTurnNotify.AumidHelper]::SetShortcutAumid($lnk, $tnDshAumid)',
+    '    [DshTurnNotify.AumidHelper]::SetProcessAumid($tnDshAumid)',
+    '    $tnAumidOk = $true',
+    '    $tnAumid = $tnDshAumid',
     '  }',
-    '  if ($listed) { $tnAumid = ' + psSingle(aumid) + ' }',
     '} catch { }',
   ].join('\n')
 }
@@ -389,12 +404,16 @@ export function buildMacNotifyScript(title: string, body: string): string {
  * 点击（DoEvents 消息泵），超时静默退出。默认 5 分钟（通知中心里的
  * 卡片在进程退出后成为死卡片——点击无效果，故驻留要长）。
  */
-export function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string {
+export function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean, aumidSetup = ''): string {
   const secs = Math.max(1, Math.min(3600, Math.ceil(waitSeconds)))
   const tipMs = Math.min(60000, secs * 1000)
   return [
     'Add-Type -AssemblyName System.Windows.Forms',
     'Add-Type -AssemblyName System.Drawing',
+    // 品牌 setup（buildEnsureAumidScript 产物）：注册 dsh AUMID + 把本
+    // PowerShell 进程的显式 AUMID 设置为 dsh → 提升后的 toast 归属显示
+    // dsh（而非 Windows PowerShell）。失败保持 $tnAumidOk=$false，无副作用。
+    ...aumidSetup.split('\n').filter(l => l.length > 0),
     '$clickUrl = ' + psSingle(clickUrl),
     '$deepLink = ' + psSingle(deepLink),
     '$body = ' + psSingle('{"sessionId":' + JSON.stringify(sessionId) + '}'),
@@ -494,7 +513,10 @@ export function apply(ctx: Context, config: Config) {
   const focusQueue: FocusEntry[] = []
   const focusWaiters = new Set<FocusWaiter>()
   const presenceSeen = new Map<string, number>()
-  let focusSeq = 0
+  // Date.now() 基数：跨宿主重启单调。从 0 计数会在重启后归零，而被未
+  // 刷新的旧页面（客户端记着旧 lastSeq）在服务端过滤与客户端去重两处
+  // 当作重复条目吞掉——重装插件后不刷新页面时点击被无声丢弃。
+  let focusSeq = Date.now()
   const pollHoldMs = Math.max(500, Math.min(10_000, Math.floor(config.presenceTimeoutMs / 2)))
   const FOCUS_TTL_MS = 60_000
   const FOCUS_QUEUE_MAX = 32
@@ -621,7 +643,7 @@ export function apply(ctx: Context, config: Config) {
           const valid = sessionId.length > 0 && sessionId.length <= 256
           const open = !valid || focusWaiters.size === 0
           if (valid) {
-            log('balloon click →', sessionId, 'open=' + open)
+            log('balloon click →', sessionId, 'open=' + open, 'waiters=' + focusWaiters.size)
             enqueueFocus(sessionId)
           }
           try {
@@ -733,7 +755,7 @@ export function apply(ctx: Context, config: Config) {
       const aumidSetup = config.windowsToastAumid === 'auto' ? buildEnsureAumidScript(DSH_AUMID) : ''
       if (wantBalloon) {
         const base = config.webUrl.replace(/\/$/, '')
-        const script = buildBalloonScript(title, body, vars.sessionId, base + '/turn-notify/click', deepLinkUrl(config, vars.sessionId), Math.ceil(config.balloonWaitMs / 1000), config.sound)
+        const script = buildBalloonScript(title, body, vars.sessionId, base + '/turn-notify/click', deepLinkUrl(config, vars.sessionId), Math.ceil(config.balloonWaitMs / 1000), config.sound, aumidSetup)
         // balloon 进程驻留等点击（至多 balloonWaitMs，默认 5 分钟），execFile
         // 的 10s 通用超时不够；timeout 0 + unref（与 Linux notify-send -A 同款）。
         const child = execFile('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePs(script)], { timeout: 0 }, (err) => {

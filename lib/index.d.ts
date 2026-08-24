@@ -117,12 +117,15 @@ export declare const Config: Schema<Config>;
  */
 export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumidSetup?: string): string;
 /**
- * 自有 AUMID 的注册与校验脚本（导出供测试在真实 PowerShell 下解析验证）。
- * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式，
- * 故：无 dsh.lnk 则创建（目标为无害的隐藏 PowerShell 退出命令）→ 未在
- * Get-StartApps 列出则经属性存储写入 System.AppUserModel.ID → 最终仍
- * 未列出（注册失败/被清理）则不改写 $tnAumid（保持回退值 PowerShell
- * AUMID）。全程 try/catch：品牌注册任何失败都不影响通知显示本身。
+ * 自有 AUMID 的注册脚本（导出供测试在真实 PowerShell 下解析验证）。
+ * Windows 对非打包应用的 toast 显示名取自 AUMID 对应的开始菜单快捷方式：
+ * 无 dsh.lnk 则创建 → 经属性存储写入 System.AppUserModel.ID（幂等）→ 成功
+ * 即信任（不再用 Get-StartApps 校验——shell 对新快捷方式的索引有延迟，
+ * 严格校验会长期回退 PowerShell AUMID，真机表现为通知一直显示
+ * Windows PowerShell）→ 成功后把当前进程的显式 AUMID 一并设置
+ * （SetCurrentProcessExplicitAppUserModelID），balloon 提升的 toast 归属
+ * 同样变为 dsh。全程 try/catch：任何失败只保持 $tnAumidOk=$false，
+ * 调用方维持各自回退，不影响通知显示。
  */
 export declare function buildEnsureAumidScript(aumid: string): string;
 /** macOS 通知 AppleScript（导出供测试在真实 osascript 下验证）。 */
@@ -135,7 +138,7 @@ export declare function buildMacNotifyScript(title: string, body: string): strin
  * 点击（DoEvents 消息泵），超时静默退出。默认 5 分钟（通知中心里的
  * 卡片在进程退出后成为死卡片——点击无效果，故驻留要长）。
  */
-export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean): string;
+export declare function buildBalloonScript(title: string, body: string, sessionId: string, clickUrl: string, deepLink: string, waitSeconds: number, soundOn: boolean, aumidSetup?: string): string;
 /** Windows 提示音脚本（导出供测试验证）。 */
 export declare function buildSoundScript(file: string): string;
 /** -EncodedCommand 编码（UTF-16LE base64）。 */

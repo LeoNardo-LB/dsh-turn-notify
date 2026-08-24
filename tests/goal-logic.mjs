@@ -163,6 +163,10 @@ const payload = JSON.parse(h1result.body)
 assert.equal(payload.entries.length, 1, '唤醒应带回恰好 1 条聚焦条目')
 assert.equal(payload.entries[0].sessionId, 'sim-focus-1', '聚焦条目应含正确 sessionId')
 assert.ok(typeof payload.entries[0].seq === 'number' && payload.entries[0].seq > 0, '条目应带递增 seq')
+// seq 基数 = Date.now()（跨重启单调，dev.9+）：后续挂起用例的 since 必须
+// 取动态最大 seq（写死小整数会小于全部条目 → wait 不挂起、立即返回）
+const maxSeq = payload.entries[0].seq
+assert.ok(maxSeq > 1_000_000_000, 'seq 应为 Date.now() 基数（重启后仍大于旧客户端 lastSeq，防点击被吞）')
 console.log('FOCUS-WAKE-OK：挂起被 POST 唤醒并带回条目')
 // H2: 无新条目 → 挂起至超时空返回（keepAlive 保事件循环：hold 定时器是 unref 的，
 // 真实进程有 http server 常驻、测试进程需要自持）
@@ -200,11 +204,11 @@ const click1 = await postJson(clickHandler, { sessionId: 'sim-click-1' })
 assert.equal(click1.code, 200, 'click 应回 200')
 assert.equal(JSON.parse(click1.body).open, true, '无挂起 wait 时 open=true（调用方需深链开浏览器）')
 // 挂起 wait（页面在线）→ open:false 且入队（wait 立即唤醒带回条目）
-// since 用当前已入队最大 seq（H1 的 1 + click1 的 2）：既无待取条目可挂起，
-// 唤醒过滤（seq > since）也能带回 click 的新条目
+// since 必须取 click1 入队后的最大 seq（= maxSeq+1）：既无待取条目可挂起，
+// 唤醒过滤（seq > since）也能带回 click2 的新条目
 const keepAlive3 = setInterval(() => {}, 1000)
 const h3 = makeRes()
-void Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t2&since=2' }, h3.res)).then(() => h3.done)
+void Promise.resolve(waitHandler({ url: '/turn-notify/focus-wait?client=t2&since=' + (maxSeq + 1) }, h3.res)).then(() => h3.done)
 await sleep(150)
 const click2 = await postJson(clickHandler, { sessionId: 'sim-click-2' })
 assert.equal(JSON.parse(click2.body).open, false, '页面在线（挂起 wait）时 open=false（已开页面原地切换，零新标签页）')
