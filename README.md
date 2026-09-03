@@ -111,6 +111,13 @@ turn-notify:
   questionChars: 30
 ```
 
+## 宿主兼容矩阵
+
+| dsh 版本 | 状态 | 依据 |
+|---|---|---|
+| 0.1.1-rc.2（V1） | ✅ 实机运行中 | web profile bundle 挂载（github: 依赖），通知/提示音/聚焦/goal 静默全场景在用 |
+| 0.1.2-alpha.5（V2） | ✅ 兼容（静态实证，实机验收待 V2 窗口） | 事件面 `session/event`、`goal/changed`、`session/disposed`、`agent/status` 两代全存活；`@deepseek-ai/dsh-agent` 包两代发布且仅类型引用；client 半为本地最小接口声明（零 runtime 包依赖），`dsh.client.inject` 的 runtime 行在 V2 为无害空引（arriveGraphRow 静默跳过） |
+
 ## 安装 / 卸载
 
 ```bash
