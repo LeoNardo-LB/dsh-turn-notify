@@ -56,6 +56,27 @@
  *   注：重启/resume 后的 active goal 一律 disarmed（不自动续跑），
  *   与 live 事件追踪的可见范围一致，无需回放 durable 日志。
  *
+ * 何时通知（子代理对齐，waitForSubagents，默认开）：
+ *   dsh web 会话列表"进行中"的官方判据（dsh-client-ui-workspace 的
+ *   sessionStatuses + indexSubagentDescendants）：本会话 agent 在跑
+ *   OR 任一 origin=subagent 的后代会话在跑（沿 parentSession 链向
+ *   全部祖先记账；fork 有 parentSession 但无 origin，不算 subagent）。
+ *   本插件对齐该语义：根 agent idle 时子树内仍有 subagent 在跑 →
+ *   不通知，等最后一个结束才响（纯事件驱动、无超时——与 web 一致，
+ *   后台长跑任务期间 web 也一直显示进行中）。最后一个 subagent
+ *   idle / 运行中被销毁（interrupt）都会触发子树静默重评估。
+ *   机制层同样对齐 web 的「事件供延迟、拉取供真相」双通道：
+ *   - 加载时经宿主 agents 注册表自举基线（判据与 web 的
+ *     session.list/summaryFor 完全一致：agents.get(id)?.status ===
+ *     'running'；只登记不触发，对齐 web「首次观测只记录」）；
+ *   - 每次 settle（唯一不可撤回的决策点）前重读注册表现值修复
+ *     事件漂移（对齐 web 重连重拉 session.list 的收敛机制；同步
+ *     读、无 web 端"拉取期间事件重放"的交错窗口）。
+ *   竞态兜底：subagent 会话已创建（session/created）但状态尚未观测
+ *   到（创建→首跑的微小间隙）时进 subagentQuietMs 窗口；窗口内转
+ *   running 则继续等待，耗尽仍无动静则照常通知（只会迟到不会丢）。
+ *   根重新 running（新提问/steering/goal 续跑）作废全部挂起状态。
+ *
  * 通知内容（模板化，占位符 {title} {question} {sessionId}）：
  *   标题 = titleTemplate 渲染（默认 '{title}'：会话标题，首轮可能
  *         未生成，退回 fallbackTitle）
@@ -101,6 +122,8 @@ export interface Config {
     rootOnly: boolean;
     skipGoalRounds: boolean;
     goalQuietMs: number;
+    waitForSubagents: boolean;
+    subagentQuietMs: number;
     fallbackTitle: string;
     fallbackMessage: string;
     questionChars: number;

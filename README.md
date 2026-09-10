@@ -23,6 +23,52 @@ agent 由 running 转 idle 不一定等于"等用户"——goal 自动续跑
 重启/resume 后的 active goal 一律 disarmed（不自动续跑），与 live 事件
 追踪的可见范围一致，无需回放 durable 日志。
 
+## 何时通知（子代理对齐，默认开）
+
+主 agent 结束对话 ≠ 会话结束：后台 subagent 仍在跑时，dsh web 会话
+列表的该会话依然显示"进行中"。本插件的通知时机与 web 的"进行中"
+状态**逐字对齐**——web 官方判据（`dsh-client-ui-workspace` 的
+`sessionStatuses` + `indexSubagentDescendants`）：
+
+```
+会话行"进行中" ⇔ 本会话 agent 在跑
+              OR 任一 origin=subagent 的后代会话在跑（沿 parentSession
+                 链向全部祖先记账，任意深度；fork 有 parentSession 但
+                 无 origin，不算 subagent、属于顶层会话）
+```
+
+插件据此判定：
+
+1. **根 agent idle 时子树内仍有 subagent 在跑 → 不通知**，等最后一个
+   结束才响（纯事件驱动、无超时——与 web 一致，后台长跑任务期间
+   web 也一直显示进行中）。嵌套 subagent（孙辈）沿血缘链同样向根
+   记账；运行中被销毁（interrupt_agent / 工具侧收尾 dispose）同样
+   计入子树静默。
+2. **最后一个 subagent idle / 被销毁 → 子树静默 → 通知**（再过 goal
+   判别门，见上节；两道门串联生效）。
+3. **根重新 running（新提问 / steering / goal 续跑）→ 作废挂起通知**，
+   该轮结束重新判定。
+4. **竞态兜底**（subagentQuietMs，默认 500ms）：subagent 会话已创建
+   （session/created）但首个 agent/status 尚未到达的微小间隙里根
+   idle → 进兜底窗口；窗口内转 running 则继续等待，耗尽仍无动静则
+   照常通知（通知只会迟到不会丢）。web 的行状态在这同一间隙里也是
+   先 idle 后翻进行中——通知不可撤回，故取保守侧。
+5. **机制层双通道对齐**（web 的「事件供延迟、拉取供真相」）：
+   - **加载自举** = web 冷启动的 `session.list` 基线：经宿主 `agents`
+     注册表自举存活 agent 的 running 位与血缘（判据逐字一致：
+     `agents.get(id)?.status === 'running'`），只登记不触发——对齐
+     web「首次观测只记录，加载时已 idle 的会话不挂提醒」；
+   - **决策点权威重读** = web 重连重拉的收敛机制：每次 settle（通知
+     唯一且不可撤回的出口）前重读注册表现值，修复事件漏收的
+     running/idle 漂移；插件在进程内同步读，天然没有 web 端"拉取
+     期间事件重放"（listMutations）的交错窗口。
+6. `waitForSubagents: false` 可关闭整道门，恢复"根 idle 即通知"的
+   旧行为。
+
+`rootOnly` 的"根"判据同源修正：以 `header.origin !== 'subagent'` 为准
+（此前用 parentSession 判根，把 fork 会话误当子代理静默——fork 在
+web 会话列表是顶层行，照常通知）。
+
 ## 提问通知（默认关）
 
 真人提问进入会话的瞬间也响一次（提示音 + 桌面通知），内容 = **会话标题
@@ -92,7 +138,11 @@ WinRT 类型加载——即解码/解析/转义全部正确，**仅 toast 的最
 
 ## 噪音过滤
 
-- rootOnly（默认开）：只通知根会话，子代理/后台任务不响。
+- rootOnly（默认开）：只通知根会话（判据 `origin !== 'subagent'`，
+  fork 属于顶层），子代理/后台任务不响。
+- waitForSubagents（默认开）：与 web"进行中"对齐——子树内仍有
+  subagent 在跑不响，全部结束才响（见上节）。
+- subagentQuietMs（默认 500）：subagent 创建→首跑间隙的竞态兜底窗口。
 - skipGoalRounds（默认开）：goal 自动续跑轮不响（见上）。
   置 false 恢复"每次 idle 都通知"。
 - goalQuietMs（默认 3000）：续跑判定兜底窗口。
@@ -212,8 +262,11 @@ Windows 音效（单音源原则，默认 = 系统通知音）：默认（soundF
 
 验证矩阵：`node tests/goal-logic.mjs`（goal 判别仿真 + 聚焦通道路由级
 验证：长轮询挂起/唤醒、balloon click 端点 open 语义，任意平台）、
-`node tests/client-logic.mjs`（浏览器端逻辑：深链聚焦重试 / 长轮询消费 /
-广播——直接驱动构建产物）、`node tests/windows-pwsh.mjs [powershell/pwsh]`
+`node tests/subagent-logic.mjs`（子代理对齐仿真：后台/并发/嵌套
+subagent 等待、竞态兜底、挂起作废、运行中销毁、fork 顶层、goal 复合、
+重载自举、决策点漂移修复——任意平台）、`node tests/client-logic.mjs`（浏览器端逻辑：
+深链聚焦重试 / 长轮询消费 / 广播——直接驱动构建产物）、
+`node tests/windows-pwsh.mjs [powershell/pwsh]`
 （Windows 路径：toast 音源断言 + balloon 脚本解析/编码往返/关键内容）、
 `node tests/macos-notify.mjs`（macOS 路径）；CI 三平台常跑。
 
@@ -224,11 +277,15 @@ Windows 音效（单音源原则，默认 = 系统通知音）：默认（soundF
 ```bash
 pnpm install          # 安装依赖（typescript / @types/node / cordis）
 pnpm run build        # tsc 编译 src/ → lib/（提交前跑）
-pnpm test             # goal 判别逻辑仿真测试
+pnpm test             # 仿真测试：goal 判别 + 子代理对齐 + 浏览器端
 ```
 
 ## 已知边界
 
+- 子代理对齐依赖事件面 `session/created`（竞态兜底）与 `agents` 注册表
+  （重载自举，判据同 web 的 session.list）；宿主缺失任一均优雅退化
+  ——前者退回 agent/status 时机登记（微小竞态窗口回到旧行为），后者
+  退化为纯 live 事件追踪，不影响既有通知。
 - 桌面通知/提示音失败（如无 DBUS、无声卡）只警告一次并静默降级。
 - 通道子进程 fire-and-forget（10s 超时），永不阻塞 agent loop。
 - 首轮回复时标题常未生成（异步），退回 fallbackTitle；重启后恢复的既有

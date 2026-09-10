@@ -56,6 +56,27 @@
  *   注：重启/resume 后的 active goal 一律 disarmed（不自动续跑），
  *   与 live 事件追踪的可见范围一致，无需回放 durable 日志。
  *
+ * 何时通知（子代理对齐，waitForSubagents，默认开）：
+ *   dsh web 会话列表"进行中"的官方判据（dsh-client-ui-workspace 的
+ *   sessionStatuses + indexSubagentDescendants）：本会话 agent 在跑
+ *   OR 任一 origin=subagent 的后代会话在跑（沿 parentSession 链向
+ *   全部祖先记账；fork 有 parentSession 但无 origin，不算 subagent）。
+ *   本插件对齐该语义：根 agent idle 时子树内仍有 subagent 在跑 →
+ *   不通知，等最后一个结束才响（纯事件驱动、无超时——与 web 一致，
+ *   后台长跑任务期间 web 也一直显示进行中）。最后一个 subagent
+ *   idle / 运行中被销毁（interrupt）都会触发子树静默重评估。
+ *   机制层同样对齐 web 的「事件供延迟、拉取供真相」双通道：
+ *   - 加载时经宿主 agents 注册表自举基线（判据与 web 的
+ *     session.list/summaryFor 完全一致：agents.get(id)?.status ===
+ *     'running'；只登记不触发，对齐 web「首次观测只记录」）；
+ *   - 每次 settle（唯一不可撤回的决策点）前重读注册表现值修复
+ *     事件漂移（对齐 web 重连重拉 session.list 的收敛机制；同步
+ *     读、无 web 端"拉取期间事件重放"的交错窗口）。
+ *   竞态兜底：subagent 会话已创建（session/created）但状态尚未观测
+ *   到（创建→首跑的微小间隙）时进 subagentQuietMs 窗口；窗口内转
+ *   running 则继续等待，耗尽仍无动静则照常通知（只会迟到不会丢）。
+ *   根重新 running（新提问/steering/goal 续跑）作废全部挂起状态。
+ *
  * 通知内容（模板化，占位符 {title} {question} {sessionId}）：
  *   标题 = titleTemplate 渲染（默认 '{title}'：会话标题，首轮可能
  *         未生成，退回 fallbackTitle）
@@ -118,6 +139,8 @@ export interface Config {
   rootOnly: boolean
   skipGoalRounds: boolean
   goalQuietMs: number
+  waitForSubagents: boolean
+  subagentQuietMs: number
   fallbackTitle: string
   fallbackMessage: string
   questionChars: number
@@ -165,6 +188,8 @@ export const Config: Schema<Config> = Schema.object({
   rootOnly: Schema.boolean().default(true).description('只通知根会话（跳过子代理/后台任务）'),
   skipGoalRounds: Schema.boolean().default(true).description('goal 自动续跑的轮次结束不通知；goal 完结/暂停/受阻、真正停下等用户输入时才响'),
   goalQuietMs: Schema.number().default(3000).description('goal 看似会续跑时的兜底等待窗口：期间重新 running 则取消通知，耗尽仍空闲则照常通知'),
+  waitForSubagents: Schema.boolean().default(true).description('与 dsh web 会话列表状态对齐：会话树内仍有 subagent 运行时不通知，全部结束才通知（后台长跑任务期间持续静默；子代理中途销毁同样计入静默）'),
+  subagentQuietMs: Schema.number().default(500).description('子代理已创建但状态未观测到时的竞态兜底窗口（毫秒）：窗口内转 running 则继续等待，耗尽仍无动静则照常通知（只会迟到不会丢）'),
   fallbackTitle: Schema.string().default('DSH').description('无会话标题时的通知标题兜底'),
   fallbackMessage: Schema.string().default('回复结束（agent 已空闲）').description('未捕获到用户提问时的正文兜底'),
   questionChars: Schema.number().default(80).description('正文 = 本轮用户提问的前 N 个字符；0 = 不含提问、正文退回 fallbackMessage'),
@@ -198,10 +223,18 @@ interface TitleServiceLike {
   get(session: unknown): { title?: unknown } | undefined
 }
 
-/** 每个 session 的标题 + 最近一条真人提问。 */
+/** 事件载荷里会话对象的最小形态（跨 dsh 版本按运行时字段收窄）。 */
+interface SessionLike {
+  id?: unknown
+  header?: { parentSession?: unknown; origin?: unknown }
+}
+
+/** 每个 session 的标题 + 最近一条真人提问 + 最近一次会话对象（标题解析用）。 */
 interface SessionInfo {
   title?: string
   question?: string
+  /** 最近一次在事件里见到的会话对象；settle 延迟通知时 resolveTitle 用。 */
+  session?: SessionLike
 }
 
 /**
@@ -815,6 +848,7 @@ export function apply(ctx: Context, config: Config) {
   const resolveTitle = (session: unknown, sessionId: string): string | undefined => {
     const live = info.get(sessionId)?.title
     if (live !== undefined && live.length > 0) return live
+    if (session === undefined || session === null) return undefined
     const svc = (ctx as unknown as { get(name: string): unknown }).get('sessionTitle') as TitleServiceLike | undefined
     const folded = svc?.get(session)?.title
     return typeof folded === 'string' && folded.length > 0 ? folded : undefined
@@ -824,6 +858,8 @@ export function apply(ctx: Context, config: Config) {
   const goalWillContinue = new Map<string, boolean>()
   /** 兜底窗口中的定时器（续跑兜底：窗口耗尽仍未 running 则通知）。 */
   const pendingQuiet = new Map<string, ReturnType<typeof setTimeout>>()
+  /** 每个 agent 的 running 起始时刻，用于 minRunMs 过滤。 */
+  const runningSince = new Map<string, number>()
 
   const cancelQuiet = (sessionId: string): void => {
     const t = pendingQuiet.get(sessionId)
@@ -833,9 +869,218 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
+  /**
+   * 会话血缘（对齐 dsh web 判据）：web 会话列表"进行中"= 本会话 agent
+   * 在跑 OR 任一 origin=subagent 后代在跑（indexSubagentDescendants 沿
+   * parentSession 链向全部祖先记账）。fork 有 parentSession 但无 origin，
+   * 是顶层会话、不算 subagent 后代——官方语义以 origin 为准，不用
+   * parentSession 判根（老版本插件用它判根，把 fork 误当子代理静默）。
+   */
+  interface LineageInfo {
+    /** 直接父会话 id（subagent 与 fork 都有；仅 subagent 参与记账）。 */
+    parent?: string
+    /** header.origin === 'subagent'（dsh-subagent childSessionMeta 盖章）。 */
+    subagent: boolean
+    /** 是否已观测过该会话的 agent/status（未观测 = 创建→首跑的间隙）。 */
+    statusSeen: boolean
+  }
+  const lineage = new Map<string, LineageInfo>()
+  /** 当前 running 的全部会话（含 subagent；agent/status 维护）。 */
+  const runningSessions = new Set<string>()
+  /** 根 idle 后正在等子树静默的会话（事件驱动挂起，无定时器）。 */
+  const waitingQuiesce = new Set<string>()
+  /** 创建→running 竞态兜底窗口的定时器。 */
+  const pendingSubagentQuiet = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const registerLineage = (session: unknown): void => {
+    if (session === null || typeof session !== 'object') return
+    const s = session as SessionLike
+    if (s.id === undefined) return
+    const id = String(s.id)
+    const entry = lineage.get(id) ?? { subagent: false, statusSeen: false }
+    if (s.header?.parentSession !== undefined) entry.parent = String(s.header.parentSession)
+    if (s.header?.origin === 'subagent') entry.subagent = true
+    lineage.set(id, entry)
+  }
+
+  /** 官方"根"判据：header.origin !== 'subagent'（fork 也是顶层会话）。 */
+  const isRootSession = (session: unknown): boolean => {
+    if (session === null || typeof session !== 'object') return true
+    return (session as SessionLike).header?.origin !== 'subagent'
+  }
+
+  /** 从 sessionId 沿 parentSession 链向上的全部祖先（近→远，含顶层根；循环安全）。 */
+  const ancestorsOf = (sessionId: string): string[] => {
+    const out: string[] = []
+    const seen = new Set<string>([sessionId])
+    let cur = lineage.get(sessionId)
+    while (cur !== undefined && cur.subagent && cur.parent !== undefined && !seen.has(cur.parent)) {
+      seen.add(cur.parent)
+      out.push(cur.parent)
+      cur = lineage.get(cur.parent)
+    }
+    return out
+  }
+
+  /** sessionId 的全部 subagent 后代（任意深度；与 web 记账方向一致：由后代向祖先归属）。 */
+  const descendantsOf = (sessionId: string): string[] => {
+    const out: string[] = []
+    for (const [id, entry] of lineage) {
+      if (!entry.subagent) continue
+      if (ancestorsOf(id).includes(sessionId)) out.push(id)
+    }
+    return out
+  }
+
+  const cancelSubagentQuiet = (sessionId: string): void => {
+    const t = pendingSubagentQuiet.get(sessionId)
+    if (t !== undefined) {
+      clearTimeout(t)
+      pendingSubagentQuiet.delete(sessionId)
+    }
+  }
+
+  /**
+   * 注册表同步（机制对齐 web 的「事件供延迟、拉取供真相」双通道）：
+   * web 端 session.list 基线 + api-session/status 事件 + 重连重拉三件套
+   * 修复事件漂移；本插件以宿主 agents 注册表（同一判据
+   * agents.get(id)?.status === 'running'）实现对应机制：
+   *   baseline —— 插件（重）加载时：记录 running 位与血缘，只登记不
+   *               触发任何通知（对齐 web「首次观测只记录，加载时已
+   *               idle 的会话不挂提醒」）。
+   *   repair   —— 每次 settle（唯一不可撤回的决策点）前：以注册表现值
+   *               修复事件漏收的 running/idle 漂移（运行位以拉取为真相），
+   *               但不把未观测过的会话标成 seen——「已创建待首跑」的
+   *               微间隙仍留给竞态兜底窗口（对齐 web 的边沿判别只认
+   *               事件、基线不挂提醒的分工）。
+   * 注册表缺席的 subagent 视同不再运行（agent 不在即不会再跑，durable
+   * 行语义）；服务缺席（旧宿主）时返回 false，退化为纯 live 事件追踪。
+   */
+  const registrySync = (mode: 'baseline' | 'repair'): boolean => {
+    try {
+      const registry = (ctx as unknown as { get(name: string): unknown }).get('agents') as
+        | { list?: () => Array<{ session?: unknown; status?: unknown }> }
+        | undefined
+      if (typeof registry?.list !== 'function') return false
+      const live = new Set<string>()
+      for (const agent of registry.list()) {
+        const session = agent?.session
+        if (session === null || typeof session !== 'object' || (session as SessionLike).id === undefined) continue
+        registerLineage(session)
+        const key = String((session as SessionLike).id)
+        live.add(key)
+        getInfo(key).session = session as SessionLike
+        const entry = lineage.get(key)
+        if (agent.status === 'running') {
+          runningSessions.add(key)
+          if (entry !== undefined) entry.statusSeen = true
+        } else {
+          // idle：repair 只修复已观测会话的运行位；baseline 额外登记
+          // 首次观测（mid-life 会话不会再来首个 status 事件）
+          if (entry !== undefined && entry.statusSeen) runningSessions.delete(key)
+          if (mode === 'baseline' && entry !== undefined) entry.statusSeen = true
+        }
+      }
+      // 注册表缺席且从未观测的 subagent：agent 已不在（从未驱动即销毁/
+      // 已收尾），该会话不会再跑——视同已观测且不再运行
+      for (const [key, entry] of lineage) {
+        if (entry.subagent && !live.has(key) && !entry.statusSeen) {
+          entry.statusSeen = true
+          runningSessions.delete(key)
+        }
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // 现场自举（web 冷启动 session.list 的对应物）：只登记、不触发通知
+  if (registrySync('baseline')) {
+    const running = [...runningSessions].length
+    log('现场自举: live agents=' + lineage.size, 'running=' + running)
+  }
+
+  /** 真正发出一次轮次结束通知（全部静默判定通过后唯一的出口）。 */
+  const notifyNow = (sessionId: string): void => {
+    // 立即通知路径可能撞上仍在计时的静默窗口定时器：先取消，
+    // 否则定时器到点会再 fire 一次（双通知）。
+    cancelQuiet(sessionId)
+    cancelSubagentQuiet(sessionId)
+    waitingQuiesce.delete(sessionId)
+    const s = info.get(sessionId)
+    const rawTitle = resolveTitle(s?.session, sessionId) ?? config.fallbackTitle
+    const rawBody =
+      config.questionChars > 0 && s?.question !== undefined && s.question.length > 0
+        ? truncate(s.question, config.questionChars)
+        : config.fallbackMessage
+    const vars = { title: rawTitle, question: rawBody, sessionId }
+    const title = render(config.titleTemplate, vars)
+    const body = render(config.bodyTemplate, vars)
+    // 命令类通道的占位符注入最终渲染值（与桌面通知显示一致）
+    const finalVars = { title, question: body, sessionId }
+
+    log('agent idle → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId)
+
+    if (config.notifySend) sendDesktop(title, body, finalVars, '')
+    if (config.sound && !windowsSystemAudioCovers('')) sendSound(finalVars)
+    if (config.bell) process.stdout.write('\x07')
+    if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
+  }
+
+  /**
+   * 一次轮次的最终通知决策（根 idle、子树静默触发、竞态窗口到期共用）：
+   * 权威重读 → 子代理对齐门 → goal 判别门 → 通知。这是通知唯一的
+   * 出口，也是唯一不可撤回的动作——决策前先以注册表现值修复事件
+   * 漂移（web 的「拉取供真相」机制落在决策点的形态）。
+   * @param skipUnseenWindow 竞态窗口到期重入时为 true——不再因"状态未
+   *        观测"二次开窗（否则永不启动的子代理会让窗口无限自续）。
+   */
+  const settle = (sessionId: string, skipUnseenWindow = false): void => {
+    cancelQuiet(sessionId)
+    cancelSubagentQuiet(sessionId)
+    registrySync('repair')
+    if (config.waitForSubagents) {
+      const descendants = descendantsOf(sessionId)
+      const running = descendants.filter(id => runningSessions.has(id))
+      if (running.length > 0) {
+        waitingQuiesce.add(sessionId)
+        log('idle 但 subagent 仍在跑 → 等待子树静默', 'session=' + sessionId, 'running=' + running.length)
+        return
+      }
+      if (!skipUnseenWindow && descendants.some(id => !lineage.get(id)?.statusSeen)) {
+        waitingQuiesce.add(sessionId)
+        log('idle 但 subagent 状态未观测 → 竞态兜底窗口 ' + config.subagentQuietMs + 'ms', 'session=' + sessionId)
+        const t = setTimeout(() => {
+          pendingSubagentQuiet.delete(sessionId)
+          settle(sessionId, true)
+        }, config.subagentQuietMs)
+        if (typeof t === 'object' && t !== null && 'unref' in t) {
+          ;(t as { unref(): void }).unref()
+        }
+        pendingSubagentQuiet.set(sessionId, t)
+        return
+      }
+    }
+    waitingQuiesce.delete(sessionId)
+    // goal 看似还会自动续跑 → 先不响，进兜底窗口等它重新 running。
+    if (config.skipGoalRounds && goalWillContinue.get(sessionId) === true) {
+      log('idle 但 goal 将续跑 → 进入 ' + config.goalQuietMs + 'ms 静默窗口', 'session=' + sessionId)
+      const t = setTimeout(() => notifyNow(sessionId), config.goalQuietMs)
+      if (typeof t === 'object' && t !== null && 'unref' in t) {
+        ;(t as { unref(): void }).unref() // 不阻止进程退出（一次性任务场景）
+      }
+      pendingQuiet.set(sessionId, t)
+      return
+    }
+    notifyNow(sessionId)
+  }
+
   // 会话事实追踪：标题快照（latest-wins）+ 最近一条真人提问。
-  ctx.on('session/event', (session: { id: unknown; header?: { parentSession?: unknown } }, event: { type: string; data: unknown }) => {
+  ctx.on('session/event', (session: SessionLike, event: { type: string; data: unknown }) => {
     const sessionId = String(session.id)
+    registerLineage(session)
+    getInfo(sessionId).session = session
     if (event.type === 'session/title') { // live 快路径；resume 场景由 resolveTitle 的服务折叠兜底
       const data = event.data as { title?: unknown }
       if (typeof data.title === 'string' && data.title.length > 0) {
@@ -851,7 +1096,8 @@ export function apply(ctx: Context, config: Config) {
       // + 提问文本。steering 插话同样触发；goal 续跑（kind 'goal'）与
       // 注入上下文（kind 'plugin'）已被上面的 source 过滤排除。
       if (!config.notifyOnQuestion) return
-      if (config.rootOnly && session.header?.parentSession !== undefined) return
+      // 官方"根"判据按 origin（fork 有 parentSession 但同样是顶层会话）
+      if (config.rootOnly && !isRootSession(session)) return
       const rawTitle = resolveTitle(session, sessionId) ?? config.fallbackTitle
       const rawBody = config.questionChars > 0 ? truncate(q, config.questionChars) : config.fallbackMessage
       const vars = { title: rawTitle, question: rawBody, sessionId }
@@ -868,6 +1114,7 @@ export function apply(ctx: Context, config: Config) {
 
   // goal 状态追踪：判定 idle 是"等用户"还是"马上续跑"。
   ;(ctx.on as OnGoalChanged)('goal/changed', ({ agent, change }) => {
+    registerLineage(agent.session)
     const sessionId = String(agent.session.id)
     const g = change.goal
     const willContinue =
@@ -878,81 +1125,85 @@ export function apply(ctx: Context, config: Config) {
     goalWillContinue.set(sessionId, willContinue)
   })
 
-  ctx.on('session/disposed', (session: { id: unknown }) => {
-    const sessionId = String(session.id)
-    cancelQuiet(sessionId)
-    goalWillContinue.delete(sessionId)
-    info.delete(sessionId)
+  // 会话创建即登记血缘：subagent 创建（session/created）到首个
+  // agent/status(running) 之间存在微小间隙——根在此间隙内 idle 时，
+  // 血缘已在、状态未观测，settle 据此进竞态兜底窗口（而非漏判早响）。
+  ctx.on('session/created', (session: SessionLike) => {
+    registerLineage(session)
   })
 
-  /** 每个 agent 的 running 起始时刻，用于 minRunMs 过滤。 */
-  const runningSince = new Map<string, number>()
+  ctx.on('session/disposed', (session: SessionLike) => {
+    const sessionId = String(session.id)
+    // 先解析祖先链（lineage 即将收缩/摘除）
+    const ancestors = ancestorsOf(sessionId)
+    cancelQuiet(sessionId)
+    cancelSubagentQuiet(sessionId)
+    waitingQuiesce.delete(sessionId)
+    runningSessions.delete(sessionId)
+    goalWillContinue.delete(sessionId)
+    info.delete(sessionId)
+    runningSince.delete(sessionId)
+    // 与 web 一致：subagent 会话销毁后列表行仍在（running 归 false、
+    // 血缘保留——孙辈照旧向根记账，见 api-session-controller 的
+    // durable-subagent status 变异），只清运行位；非 subagent（根/fork）
+    // 整行消失，血缘随之摘除。
+    if (session.header?.origin === 'subagent') {
+      const entry = lineage.get(sessionId)
+      if (entry !== undefined) entry.statusSeen = true // 已销毁视同不再运行
+    } else {
+      lineage.delete(sessionId)
+    }
+    // 运行中被销毁（interrupt_agent 等）同样可能让祖先子树静默
+    for (const anc of ancestors) {
+      if (waitingQuiesce.has(anc) && !runningSessions.has(anc)) settle(anc)
+    }
+  })
 
   ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: 'idle' | 'running' }) => {
     const session = agent.session
     const sessionId = String(session.id)
-    const isRoot = session.header.parentSession === undefined
+    registerLineage(session)
+    const entry = lineage.get(sessionId)
+    if (entry !== undefined) entry.statusSeen = true
+    getInfo(sessionId).session = session as unknown as SessionLike
 
     if (status === 'running') {
       cancelQuiet(sessionId) // 续跑（或其他输入）到来，取消兜底通知
+      cancelSubagentQuiet(sessionId)
+      waitingQuiesce.delete(sessionId) // 新轮开始，上一轮的挂起通知作废
+      runningSessions.add(sessionId)
       runningSince.set(sessionId, Date.now())
       return
     }
     if (status !== 'idle') return
+    runningSessions.delete(sessionId)
 
+    // 该 idle 可能释放等待子树静默的祖先（rootOnly=true 时祖先只会是
+    // 根会话；rootOnly=false 时中间 subagent 也可能是通知主体）。
+    for (const anc of ancestorsOf(sessionId)) {
+      if (waitingQuiesce.has(anc) && !runningSessions.has(anc)) settle(anc)
+    }
+
+    // 本会话作为通知主体：根会话（origin !== 'subagent'，fork 属于顶层），
+    // 或 rootOnly=false 时的任意会话（保持旧语义）。
+    if (config.rootOnly && !isRootSession(session)) return
     const started = runningSince.get(sessionId)
     runningSince.delete(sessionId)
-    if (config.rootOnly && !isRoot) return
     if (started !== undefined && Date.now() - started < config.minRunMs) return
-
-    const notify = (): void => {
-      // 立即通知路径可能撞上仍在计时的静默窗口定时器：先取消，
-      // 否则定时器到点会再 fire 一次（双通知）。
-      cancelQuiet(sessionId)
-      const s = info.get(sessionId)
-      const rawTitle = resolveTitle(session, sessionId) ?? config.fallbackTitle
-      const rawBody =
-        config.questionChars > 0 && s?.question !== undefined && s.question.length > 0
-          ? truncate(s.question, config.questionChars)
-          : config.fallbackMessage
-      const vars = { title: rawTitle, question: rawBody, sessionId }
-      const title = render(config.titleTemplate, vars)
-      const body = render(config.bodyTemplate, vars)
-      // 命令类通道的占位符注入最终渲染值（与桌面通知显示一致）
-      const finalVars = { title, question: body, sessionId }
-
-      log('agent idle → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId, 'root=' + isRoot)
-
-      if (config.notifySend) sendDesktop(title, body, finalVars, '')
-      if (config.sound && !windowsSystemAudioCovers('')) sendSound(finalVars)
-      if (config.bell) process.stdout.write('\x07')
-      if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
-    }
-
-    // goal 看似还会自动续跑 → 先不响，进兜底窗口等它重新 running。
-    if (config.skipGoalRounds && goalWillContinue.get(sessionId) === true) {
-      log('idle 但 goal 将续跑 → 进入 ' + config.goalQuietMs + 'ms 静默窗口', 'session=' + sessionId)
-      cancelQuiet(sessionId)
-      const t = setTimeout(notify, config.goalQuietMs)
-      if (typeof t === 'object' && t !== null && 'unref' in t) {
-        ;(t as { unref(): void }).unref() // 不阻止进程退出（一次性任务场景）
-      }
-      pendingQuiet.set(sessionId, t)
-      return
-    }
-
-    notify()
+    settle(sessionId)
   })
 
   log('loaded; platform=' + (platform ?? 'unknown(' + process.platform + ')'), 'channels:', JSON.stringify({
     notifySend: config.notifySend, sound: config.sound, bell: config.bell,
     command: config.command ? '(custom)' : '(off)', rootOnly: config.rootOnly,
     questionChars: config.questionChars, skipGoalRounds: config.skipGoalRounds,
-    goalQuietMs: config.goalQuietMs,
+    goalQuietMs: config.goalQuietMs, waitForSubagents: config.waitForSubagents,
+    subagentQuietMs: config.subagentQuietMs,
   }))
 
   ctx.effect(() => () => {
     for (const sessionId of pendingQuiet.keys()) cancelQuiet(sessionId)
+    for (const sessionId of pendingSubagentQuiet.keys()) cancelSubagentQuiet(sessionId)
     log('disposed')
   })
 }

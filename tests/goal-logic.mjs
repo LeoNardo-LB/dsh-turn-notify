@@ -42,6 +42,8 @@ const config = {
   rootOnly: true,
   skipGoalRounds: true,
   goalQuietMs: 800,
+  waitForSubagents: true,
+  subagentQuietMs: 300,
   fallbackTitle: 'DSH',
   fallbackMessage: '回复结束',
   questionChars: 40,
@@ -102,7 +104,9 @@ await sleep(100)
 
 console.log('--- G: 子代理不通知（rootOnly）---')
 const beforeG = readFileSync(OUT, 'utf8').trim().split('\n').filter(Boolean).length
-const childAgent = { session: { id: 'sim-child-1', header: { parentSession: 'sim-session-1' } } }
+// origin: 'subagent' 是宿主 dsh-subagent childSessionMeta 的盖章字段；
+// 官方"根"判据看 origin 而非 parentSession（fork 也有 parentSession）
+const childAgent = { session: { id: 'sim-child-1', header: { parentSession: 'sim-session-1', origin: 'subagent' } } }
 // 子会话里的用户消息（理论上不会有，防御性验证）与 idle 都不得产生通知
 ctx.emit('session/event', childAgent.session, {
   type: 'user/message',
