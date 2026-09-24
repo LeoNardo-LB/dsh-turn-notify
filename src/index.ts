@@ -85,7 +85,9 @@
  *         goal 续跑消息 kind === 'goal' 不污染提问文本）
  *
  * 配置覆盖（后者胜）：Schema 默认值 → profile 组合层（id: turn-notify
- * 整行替换，需重启）→ ~/.dsh/settings.yaml 顶层 turn-notify: 段（热生效）。
+ * 整行替换）→ 旧宿主（≤0.1.5）的 ~/.dsh/settings.yaml 顶层 turn-notify: 段
+ * （热生效）。0.1.7+ settings.yaml 已迁移进 profile patch，等价热层 =
+ * 用户 patch 的 turn-notify 条目（patchReload: live 原地重载）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
