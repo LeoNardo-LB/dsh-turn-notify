@@ -111,6 +111,7 @@ export interface Config {
     webUrl: string;
     deepLinkHash: string;
     notifyActivateActions: boolean;
+    linuxClickBackend: 'auto' | 'notify-send' | 'busctl';
     terminalNotifierPath: string;
     windowsClickMode: 'auto' | 'balloon' | 'toast';
     balloonWaitMs: number;
@@ -132,6 +133,37 @@ export interface Config {
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
+/** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。
+ * dsh 0.1.7+ 认证墙修复：URL 自动附加探测到的 token（query 在 hash 前）。 */
+export declare function deepLinkUrl(config: Config, sessionId: string): string;
+/**
+ * 判定 notify-send 的 AppArmor profile 是否拦截 GetCapabilities。
+ * Ubuntu 25.10+ 的 /etc/apparmor.d/notify-send 把 dbus 白名单限定为
+ * GetServerInformation/Notify——libnotify 的 GetCapabilities 被
+ * AccessDenied 拒绝，notify-send 误判 "daemon 不支持 actions"，-A 的
+ * 点击回调链路无声死亡（通知照常显示，降级警告都没有）。纯函数，
+ * 导出供测试。
+ */
+export declare function appArmorProfileBlocksCaps(profileText: string): boolean;
+/**
+ * 解析 busctl monitor 输出的一个消息块（busctl monitor 每条消息 = 头行
+ * `‣ Type=signal … Member=Xxx` + 缩进参数行）。只关心两个信号：
+ *   ActionInvoked (id u, action_key s) —— 用户点击通知的 default action
+ *   NotificationClosed (id u, reason u) —— 通知关闭，清理挂起映射
+ * 纯函数，导出供测试。
+ */
+export declare function parseBusctlMonitorChunk(chunk: string): {
+    member: string;
+    id: number;
+    actionKey?: string;
+} | null;
+/**
+ * busctl call 发送可点击通知的完整 argv（签名 susssasa{sv}i）。
+ * actions 传 ['default', '打开会话']：default 是规范保留名（点击通知体
+ * 触发），daemon 侧显示为可点击卡片。expire 0 = daemon 默认驻留（与
+ * notify-send -A 不传 -t 同款语义）。纯函数，导出供测试。
+ */
+export declare function buildBusctlNotifyArgs(appName: string, title: string, body: string): string[];
 /**
  * Windows 可点击 toast XML（protocol launch：点击 = 用默认浏览器打开深链）。
  * audio='system'（默认）不带 <audio> 元素 → toast 播系统通知音（单音源

@@ -91,8 +91,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { execFile, execFileSync, spawn } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import Schema from '@deepseek-ai/schemastery'
 
@@ -128,6 +128,7 @@ export interface Config {
   webUrl: string
   deepLinkHash: string
   notifyActivateActions: boolean
+  linuxClickBackend: 'auto' | 'notify-send' | 'busctl'
   terminalNotifierPath: string
   windowsClickMode: 'auto' | 'balloon' | 'toast'
   balloonWaitMs: number
@@ -171,6 +172,11 @@ export const Config: Schema<Config> = Schema.object({
   webUrl: Schema.string().default('http://127.0.0.1:3080').description('点击通知打开的 Web 地址（页面没开时的深链目标 base）'),
   deepLinkHash: Schema.string().default('#dsh-focus=').description('深链 hash 前缀；页面侧客户端插件读取此 hash 定位会话'),
   notifyActivateActions: Schema.boolean().default(true).description('Linux：notify-send 用 -A/--action（点击后回调）；通知守护进程不支持 action 时置 false 退回普通通知'),
+  linuxClickBackend: Schema.union([
+    Schema.const('auto' as const).description('检测到 notify-send 被 AppArmor 限制（Ubuntu 25.10+ 拦 GetCapabilities 使 -A 回调失效）时自动改用 busctl 直发 + ActionInvoked 信号监听'),
+    Schema.const('notify-send' as const).description('恒用 notify-send -A（传统路径）'),
+    Schema.const('busctl' as const).description('恒用 busctl 直发（systemd 标配、unconfined，绕开 notify-send 的 AppArmor 拦截）'),
+  ]).default('auto').description('Linux 点击回调后端'),
   terminalNotifierPath: Schema.string().default('terminal-notifier').description('macOS 点击回调依赖的 terminal-notifier 命令（PATH 名或绝对路径）；不存在时 macOS 通知无点击功能（仍正常显示）'),
   windowsClickMode: Schema.union([
     Schema.const('auto' as const).description('页面在线用 balloon（点击复用已开页面、零新标签页），离线用 toast 深链'),
@@ -301,10 +307,92 @@ function appleString(s: string): string {
   return '"' + s.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"'
 }
 
-/** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。 */
-function deepLinkUrl(config: Config, sessionId: string): string {
+/**
+ * dsh 0.1.7+ web 认证 token（惰性探测一次，进程内缓存）。
+ * 来源：journalctl 里 dsh web 启动时打印的 URL（`dsh web: http://…?token=…`）。
+ * 深链不带 token 会被认证墙 401 挡成 "authentication required" 文本页，
+ * hash 无人消费——点击通知直达会话的能力就此丢失。webUrl 已带 token
+ * 或探测失败（非 systemd 环境）时返回空串，深链退回旧行为（依赖浏览器
+ * 已有认证 cookie）。
+ */
+let cachedWebToken: string | null = null
+function detectWebToken(): string {
+  if (cachedWebToken !== null) return cachedWebToken
+  cachedWebToken = ''
+  try {
+    // 只读最近输出、只认 dsh web: 打印行，避免大范围日志扫描
+    const out = execFileSync('journalctl', ['--user', '-n', '200', '--output', 'cat', '--no-pager'], { timeout: 3000, encoding: 'utf8' })
+    const m = [...out.matchAll(/dsh web: (https?:\/\/\S+token=([A-Za-z0-9_-]+))/g)]
+    if (m.length > 0) cachedWebToken = m[m.length - 1][2]
+  } catch { /* journalctl 不可用/超时：深链退回无 token 行为 */ }
+  return cachedWebToken
+}
+
+/** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。
+ * dsh 0.1.7+ 认证墙修复：URL 自动附加探测到的 token（query 在 hash 前）。 */
+export function deepLinkUrl(config: Config, sessionId: string): string {
   const base = config.webUrl.replace(/\/$/, '')
-  return base + '/' + config.deepLinkHash + encodeURIComponent(sessionId)
+  const hasToken = /[?&]token=/.test(config.webUrl)
+  const token = hasToken ? '' : detectWebToken()
+  const query = token === '' ? '' : '?token=' + token
+  return base + '/' + query + config.deepLinkHash + encodeURIComponent(sessionId)
+}
+
+/**
+ * 判定 notify-send 的 AppArmor profile 是否拦截 GetCapabilities。
+ * Ubuntu 25.10+ 的 /etc/apparmor.d/notify-send 把 dbus 白名单限定为
+ * GetServerInformation/Notify——libnotify 的 GetCapabilities 被
+ * AccessDenied 拒绝，notify-send 误判 "daemon 不支持 actions"，-A 的
+ * 点击回调链路无声死亡（通知照常显示，降级警告都没有）。纯函数，
+ * 导出供测试。
+ */
+export function appArmorProfileBlocksCaps(profileText: string): boolean {
+  if (!/profile\s+notify-send\b/.test(profileText)) return false
+  const dbusRules = profileText.match(/dbus\s*\(send\)([\s\S]*?)(?=\n\s*\n|dbus\s*\(|include|\}|$)/g) ?? []
+  const relevant = dbusRules.filter(r => /org\.freedesktop\.Notifications/.test(r) && /member=/.test(r))
+  if (relevant.length === 0) return false
+  // 白名单规则存在且不含 GetCapabilities → caps 必被拒
+  return relevant.every(r => !/GetCapabilities/.test(r))
+}
+
+/**
+ * 解析 busctl monitor 输出的一个消息块（busctl monitor 每条消息 = 头行
+ * `‣ Type=signal … Member=Xxx` + 缩进参数行）。只关心两个信号：
+ *   ActionInvoked (id u, action_key s) —— 用户点击通知的 default action
+ *   NotificationClosed (id u, reason u) —— 通知关闭，清理挂起映射
+ * 纯函数，导出供测试。
+ */
+export function parseBusctlMonitorChunk(chunk: string): { member: string; id: number; actionKey?: string } | null {
+  const memberMatch = chunk.match(/Member=(ActionInvoked|NotificationClosed)/)
+  if (memberMatch === null) return null
+  const member = memberMatch[1]
+  // busctl monitor 的参数行是大写类型标注：`UINT32 34;` / `STRING "default";`
+  const idMatch = chunk.match(/UINT32\s+(\d+)/)
+  if (idMatch === null) return null
+  const id = Number(idMatch[1])
+  if (member === 'ActionInvoked') {
+    const keyMatch = chunk.match(/STRING\s+"([^"]*)"/)
+    return { member, id, actionKey: keyMatch !== null ? keyMatch[1] : undefined }
+  }
+  return { member, id }
+}
+
+/**
+ * busctl call 发送可点击通知的完整 argv（签名 susssasa{sv}i）。
+ * actions 传 ['default', '打开会话']：default 是规范保留名（点击通知体
+ * 触发），daemon 侧显示为可点击卡片。expire 0 = daemon 默认驻留（与
+ * notify-send -A 不传 -t 同款语义）。纯函数，导出供测试。
+ */
+export function buildBusctlNotifyArgs(appName: string, title: string, body: string): string[] {
+  return [
+    '--user', 'call',
+    'org.freedesktop.Notifications', '/org/freedesktop/Notifications', 'org.freedesktop.Notifications', 'Notify',
+    'susssasa{sv}i',
+    appName, '0', 'dialog-information', title, body,
+    '2', 'default', '打开会话',
+    '0',
+    '0',
+  ]
 }
 
 /**
@@ -727,6 +815,115 @@ export function apply(ctx: Context, config: Config) {
     run(opener, args, (m) => warnOnce('deep-link', m))
   }
 
+  const pendingClicks = new Map<number, { sessionId: string; ts: number }>()
+  const PENDING_TTL_MS = 15 * 60_000
+  const PENDING_MAX = 64
+  /** 登记点击映射；GNOME 50 的 daemon 过期不发 NotificationClosed，靠 TTL+上限清理防泄漏。 */
+  const rememberClick = (id: number, sessionId: string): void => {
+    const now = Date.now()
+    for (const [k, v] of pendingClicks) {
+      if (now - v.ts > PENDING_TTL_MS) pendingClicks.delete(k)
+    }
+    while (pendingClicks.size >= PENDING_MAX) {
+      const oldest = pendingClicks.keys().next().value
+      if (oldest === undefined) break
+      pendingClicks.delete(oldest)
+    }
+    pendingClicks.set(id, { sessionId, ts: now })
+  }
+  /** Linux 点击后端是否已切到 busctl（静态探测或运行时切换置位）。 */
+  let linuxUseBusctl = false
+  const linuxBackendChoice = config.linuxClickBackend
+  if (platform === 'linux' && linuxBackendChoice === 'busctl') linuxUseBusctl = true
+  if (platform === 'linux' && linuxBackendChoice === 'auto') {
+    // 静态探测：Ubuntu 25.10+ 的 enforce profile 拦 GetCapabilities，
+    // notify-send -A 必死；命中即直接走 busctl，省掉首条通知的无效尝试。
+    try {
+      const profilePath = '/etc/apparmor.d/notify-send'
+      if (existsSync(profilePath) && appArmorProfileBlocksCaps(readFileSync(profilePath, 'utf8'))) {
+        linuxUseBusctl = true
+        log('检测到 notify-send 的 AppArmor 限制（GetCapabilities 被拦）→ 点击通道用 busctl 直发')
+      }
+    } catch { /* 读不到按未限制处理，运行时兜底仍会切换 */ }
+  }
+  /**
+   * 常驻 busctl monitor：监听 ActionInvoked（点击 default action）与
+   * NotificationClosed（清理映射防泄漏）。子进程崩溃自动重启（退避上限
+   * 30s）；插件卸载时终止。
+   */
+  let monitorProc: ReturnType<typeof spawn> | undefined
+  let monitorStopped = false
+  let monitorBackoffMs = 1000
+  let monitorBuf = ''
+  const BUSCTL_MONITOR_ARGS = [
+    '--user', 'monitor',
+    '--match', "type='signal',interface='org.freedesktop.Notifications',member='ActionInvoked'",
+    '--match', "type='signal',interface='org.freedesktop.Notifications',member='NotificationClosed'",
+  ]
+  const handleMonitorBlock = (p: string): void => {
+    const parsed = parseBusctlMonitorChunk(p)
+    if (parsed === null) return
+    if (parsed.member === 'NotificationClosed') {
+      pendingClicks.delete(parsed.id)
+      return
+    }
+    // ActionInvoked：只认我们自己发出且尚未消费的通知
+    if (parsed.actionKey !== 'default') return
+    const pending = pendingClicks.get(parsed.id)
+    if (pending === undefined) return
+    pendingClicks.delete(parsed.id)
+    handleNotificationClick(pending.sessionId)
+  }
+  const feedMonitorChunk = (text: string): void => {
+    monitorBuf += text
+    // busctl monitor 每条消息以 ‣ 头行开始、以 MESSAGE 块的 }; 收尾。
+    // 只按 ‣ 分割会把流末尾的最后一条（无后续 ‣ 触发切分）永远留在
+    // 缓冲——ActionInvoked 恰恰常是最后一条。完整块（含 };）立即解析。
+    const parts = monitorBuf.split(/^‣/m)
+    monitorBuf = parts.pop() ?? ''
+    for (const p of parts) handleMonitorBlock(p)
+    if (/\}\s*;\s*$/.test(monitorBuf)) {
+      const complete = monitorBuf
+      monitorBuf = ''
+      handleMonitorBlock(complete)
+    }
+  }
+  const startBusctlMonitor = (): void => {
+    if (monitorStopped || monitorProc !== undefined || platform !== 'linux') return
+    try {
+      const proc = spawn('busctl', BUSCTL_MONITOR_ARGS, { stdio: ['ignore', 'pipe', 'ignore'] })
+      monitorProc = proc
+      proc.stdout.setEncoding('utf8')
+      proc.stdout.on('data', (d) => feedMonitorChunk(d))
+      // 不阻止宿主进程退出（一次性任务/测试场景）；monitor 随进程生命周期终结
+      proc.unref?.()
+      ;(proc.stdout as { unref?: () => void }).unref?.()
+      proc.on('exit', () => {
+        monitorProc = undefined
+        if (monitorStopped || !linuxUseBusctl) return
+        // 崩溃重启（指数退避，上限 30s；重启后 pendingClicks 仍有效——
+        // 通知还开着就还能点，只是错过信号的窗口内点击丢失，可接受）
+        const wait = monitorBackoffMs
+        monitorBackoffMs = Math.min(30_000, monitorBackoffMs * 2)
+        const t = setTimeout(() => { startBusctlMonitor() }, wait)
+        if (typeof t === 'object' && t !== null && 'unref' in t) t.unref()
+      })
+      proc.on('error', () => {
+        monitorProc = undefined
+        warnOnce('busctl-monitor', 'busctl monitor 启动失败（通知显示不受影响，点击回调不可用）')
+      })
+      monitorBackoffMs = 1000
+    } catch {
+      warnOnce('busctl-monitor', 'busctl monitor spawn 异常')
+    }
+  }
+  if (linuxUseBusctl) startBusctlMonitor()
+  ctx.effect(() => () => {
+    monitorStopped = true
+    monitorProc?.kill()
+    monitorProc = undefined
+  }, 'turn-notify: busctl monitor')
+
   /**
    * fire-and-forget 桌面通知（按平台分发；notifyCommand 可完全接管）。
    * soundFileOverride 与 sendSound 同源（提问用 questionSoundFile）：Windows
@@ -739,14 +936,53 @@ export function apply(ctx: Context, config: Config) {
       return
     }
     if (platform === 'linux') {
-      // -A（点击 action）隐含 --wait：进程阻塞到卡片关闭/点击，stdout 输出
-      // action 名。fire-and-forget 的 execFile 子进程天然承载这个等待；点击
-      // → exit 0 + stdout=default → 触发回调。守护进程不支持 action 时
-      // notify-send 报错退出，onFail 里降级重发普通通知。
-      if (clickable && config.notifyActivateActions) {
-        // -A 卡片不传 -t：过期会让用户来不及点；守护进程用自家驻留时长
-        const child = execFile('notify-send', ['-a', config.appName, '-A', 'default=打开会话', title, body], { timeout: 0 }, (err, stdout) => {
+      // 点击回调后端决策：
+      //   busctl（优先，auto 模式下 AppArmor 拦截时自动启用）——
+      //     Ubuntu 25.10+ 给 /usr/bin/notify-send 加了 enforce profile，dbus
+      //     白名单只有 GetServerInformation/Notify：libnotify 的
+      //     GetCapabilities 被 AccessDenied 拒绝 → notify-send 误判 "daemon
+      //     不支持 actions" → -A 回调无声死亡（通知照常显示但点击无效）。
+      //     busctl 是 systemd 标配且 unconfined：busctl call 直发 Notify
+      //     （actions 完整送达），busctl monitor 常驻监听 ActionInvoked
+      //     信号驱动点击回调。
+      //   notify-send -A（传统路径）—— -A 隐含 --wait，进程阻塞到点击，
+      //     stdout 输出 action 名；未被 AppArmor 限制的系统继续用它。
+      if (clickable && config.notifyActivateActions && linuxUseBusctl) {
+        execFile('busctl', buildBusctlNotifyArgs(config.appName, title, body), { timeout: 10_000 }, (err, stdout) => {
           if (err !== null) {
+            // busctl 不可用（非 systemd 环境）→ 降级 notify-send 传统路径
+            warnOnce('busctl', err.message ?? String(err))
+            run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
+            return
+          }
+          // stdout 形如 "u 33"：解析 daemon 分配的通知 id，挂到点击映射
+          const idMatch = String(stdout).match(/u\s+(\d+)/)
+          if (idMatch !== null) rememberClick(Number(idMatch[1]), vars.sessionId)
+        })
+      } else if (clickable && config.notifyActivateActions) {
+        // -A（点击 action）隐含 --wait：进程阻塞到卡片关闭/点击，stdout 输出
+        // action 名。fire-and-forget 的 execFile 子进程天然承载这个等待；点击
+        // → exit 0 + stdout=default → 触发回调。守护进程不支持 action 时
+        // notify-send 报错退出，onFail 里降级重发普通通知。
+        // -A 卡片不传 -t：过期会让用户来不及点；守护进程用自家驻留时长
+        const child = execFile('notify-send', ['-a', config.appName, '-A', 'default=打开会话', title, body], { timeout: 0 }, (err, stdout, stderr) => {
+          if (err !== null) {
+            if (/not supported/i.test(String(stderr)) && linuxBackendChoice === 'auto') {
+              // AppArmor 拦截 / daemon 真不支持 actions 的同款症状：运行时
+              // 自动切换 busctl 通道并重发本条（点击能力即刻恢复）。
+              linuxUseBusctl = true
+              startBusctlMonitor()
+              log('notify-send -A 不可用 → 运行时切换 busctl 点击通道')
+              execFile('busctl', buildBusctlNotifyArgs(config.appName, title, body), { timeout: 10_000 }, (err2, stdout2) => {
+                if (err2 !== null) {
+                  run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
+                  return
+                }
+                const idMatch = String(stdout2).match(/u\s+(\d+)/)
+                if (idMatch !== null) rememberClick(Number(idMatch[1]), vars.sessionId)
+              })
+              return
+            }
             // 守护进程不支持 action（常见于部分 DE）——降级为普通通知
             run('notify-send', ['-a', config.appName, '-t', String(config.expireMs), title, body], (m) => warnOnce('notify-send', m))
             return
