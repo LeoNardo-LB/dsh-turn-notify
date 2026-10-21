@@ -1,7 +1,9 @@
 # dsh-turn-notify
 
 DSH bundle 插件：**提问到达时 + agent 真正停下等用户输入时发出通知**。
-弥补 dsh 0.1.1-rc.2 没有任何原生 turn 提示通道的问题。
+弥补 dsh 没有任何原生 turn 提示通道的问题（已核验至 0.2.1-rc.2）。
+**桌面客户端在场时改走原生通道**（0.2.2-dev.16+）：webview 内
+Web Notification API 弹原生通知，点击 = 置前桌面窗口 + 直达会话。
 
 跨平台：**Linux**（notify-send + paplay）/ **macOS**（osascript + afplay）/
 **Windows**（PowerShell WinRT Toast + SoundPlayer）。三平台均在真内核 CI 上验证。
@@ -98,10 +100,34 @@ web 会话列表是顶层行，照常通知）。
 
 | 通道 | 默认 | Linux | macOS | Windows |
 |---|---|---|---|---|
-| notifySend | 开 | notify-send | osascript | balloon（auto）/ WinRT Toast |
+| desktopNotify（桌面 webview 在场） | auto | Web Notification API（页面内） | 同左 | 同左 |
+| notifySend（平台通道） | 开 | notify-send | osascript | balloon（auto）/ WinRT Toast |
 | sound | 开 | paplay | afplay | 系统通知音（默认）/ SoundPlayer |
 | bell | 关 | ASCII BEL | ASCII BEL | ASCII BEL |
 | command | 关 | /bin/sh -c | /bin/sh -c | cmd /c |
+
+## 桌面客户端原生通知（desktopNotify，0.2.2-dev.16+）
+
+dsh 桌面 app（Electron）的内嵌页面与 web 页同源注入本插件 client 半，
+长轮询 focus-wait 照常到达宿主。桌面在场时通知改走原生：
+
+1. **在场判定**：页面自识别——dsh 桌面壳以 `dsh-app://` 协议服务前端，
+   client.js 检测协议后上报 `client=desktop:<uuid>`；服务端另以 Electron
+   UA 指纹兜底（桌面 webview 请求经 forwardWebRequest 转发、UA 保留）。
+   app 退出 → 轮询停 → 在场失效 → 自动回退平台通道（正确语义）。
+2. **投递（ack-based）**：服务端把 `{kind:'notify'}` 条目经同一条
+   focus-wait 长轮询投给桌面页面（浏览器页面跳过该类型，不双响），
+   页面 `new Notification(title, {body, silent})` 弹原生通知——归属
+   桌面 app 本身（同官方更新通知身份）。展示后页面 POST
+   `/turn-notify/notify-ack`；`desktopNotifyAckMs`（默认 1500ms）内
+   无 ack（webview 断链/插件未加载）→ **平台通道兜底照发，宁重复不丢失**。
+3. **点击语义**：OS 激活置前桌面窗口 + 页面 `sessions.open(sessionId)`
+   定位会话 + POST `/turn-notify/clicked` → 宿主广播聚焦（浏览器标签页
+   后台同步切，桌面优先）+ `start dsh://open` 协议激活幂等保险置前
+   （桌面壳单实例 → focusPrimaryWindow；OS 激活已置前时无感）。
+4. **静音判定**：sound=false → 通知静音；显式 soundFile → 通知静音 +
+   宿主平台通道播该文件（单音源原则）；默认 → 通知自带系统音。
+5. 桌面不在场 / `desktopNotify: off` → 平台通道，行为与旧版一致。
 
 - `platform`：auto（默认，按宿主 OS）/ linux / macos / windows 显式指定。
 - `notifyCommand` / `soundCommand`：命令模板完全接管对应通道
@@ -159,6 +185,8 @@ profile cordis.patch.yml 里 id: turn-notify 整行替换，需重启）→
 turn-notify:
   sound: false
   questionChars: 30
+  desktopNotify: auto        # auto=桌面在场走 webview 原生通知（默认）；off=恒平台通道
+  desktopNotifyAckMs: 1500   # 原生投递的展示 ack 超时，超时平台通道兜底
 ```
 
 ## 宿主兼容矩阵
@@ -168,6 +196,7 @@ turn-notify:
 | 0.1.1-rc.2（V1） | ✅ 实机运行中 | web profile bundle 挂载（github: 依赖），通知/提示音/聚焦/goal 静默全场景在用 |
 | 0.1.2-alpha.5（V2） | ✅ 兼容（静态实证，实机验收待 V2 窗口） | 事件面 `session/event`、`goal/changed`、`session/disposed`、`agent/status` 两代全存活；`@deepseek-ai/dsh-agent` 包两代发布且仅类型引用；client 半为本地最小接口声明（零 runtime 包依赖），`dsh.client.inject` 的 runtime 行在 V2 为无害空引（arriveGraphRow 静默跳过） |
 | 0.2.0-rc.1 | ✅ 兼容（静态实证） | `@deepseek-ai/dsh-agent` 0.1.7-rc.2 与 0.2.0-rc.1 npm 产物逐字节一致；订阅的五个事件（`session/event`、`goal/changed`、`session/created`、`session/disposed`、`agent/status`）两代出现处数完全相同；会话格式迁移链无新增（最高 v3→v4） |
+| 0.2.1-rc.2 | ✅ 兼容（静态实证 + 实机通道验证） | 五事件在 dsh-session/dsh-goal/dsh-agent-loop 等包出现处数健在（1–15 处）；实机 focus-wait 长轮询 200（7.5s 挂起空返）+ click 端点响应正常（desktop profile 实测 2026-10-21）。**desktop 原生通道所依赖的三个事实面亦实证**：桌面 host 经同一 `collectIndexInjections()` 注入 client 半（dsh-desktop-host）；`forwardWebRequest` 对非静态路径转发至宿主 webserver 且仅删 host/origin/cookie/sec-fetch-site（**UA 保留**，桌面 webview 的相对 fetch 可达插件路由）；桌面壳注册 `dsh://` 协议、`dsh://open` → 单实例 → focusPrimaryWindow（restore/show/focus） |
 
 ## 安装 / 卸载
 
@@ -283,6 +312,18 @@ pnpm test             # 仿真测试：goal 判别 + 子代理对齐 + 浏览器
 
 ## 已知边界
 
+- **desktop 原生通知的 Windows 点击事件**：Electron 历史上有 renderer
+  HTML5 Notification click 不触发的 issue（electron#18746，2019，OS X
+  正常）。若当前壳复现：窗口照常被 OS 激活置前，但会话不切换、clicked
+  不上报——真机验收（见上）覆盖此项；不可用时置 `desktopNotify: off`
+  回退平台通道（balloon 点击链路不受影响）。
+- desktop 原生通知 `clickToFocus: false` 语义差异：平台通道的 toast
+  不带点击深链，而原生通知点击仍会聚焦会话（客户端不知晓该配置）；
+  需要严格无点击语义时配 `desktopNotify: off`。
+- UA 兜底依赖 Electron 默认 UA（含 `Electron/` token）；桌面壳若改写
+  UA 去掉该 token，兜底失效——页面自识别（主判据）不受影响。
+- desktop 原生通知的展示 ack 有 400ms 的客户端兜底定时器（个别平台
+  show 事件缺失）；ack 端点幂等，重复到达无害。
 - 子代理对齐依赖事件面 `session/created`（竞态兜底）与 `agents` 注册表
   （重载自举，判据同 web 的 session.list）；宿主缺失任一均优雅退化
   ——前者退回 agent/status 时机登记（微小竞态窗口回到旧行为），后者

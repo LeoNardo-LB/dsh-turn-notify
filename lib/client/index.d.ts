@@ -16,6 +16,13 @@
  *   3. 会话列表竞态重试：新开页面的会话列表异步晚到，open() 对未列出
  *      会话直接抛错——聚焦带重试（250ms 间隔、至多 15s），列表到达
  *      即成功；旧实现单次失败即吞掉，导致落地页停在恢复的旧会话上。
+ *   4. 桌面原生通知（desktop 半）：dsh 桌面 app 的内嵌页面（dsh-app:
+ *      协议）自识别，focus-wait 上报 client=desktop:<uuid>；服务端据此
+ *      把 {kind:'notify'} 条目投进长轮询，本页用 Web Notification API
+ *      弹原生通知——展示后 POST /turn-notify/notify-ack（服务端超时未
+ *      见 ack 走平台通道兜底）；点击 = sessions.open 定位会话 + POST
+ *      /turn-notify/clicked（宿主广播聚焦 + dsh://open 幂等置前桌面
+ *      窗口）。浏览器页面（http/https）跳过 notify 条目，不双响。
  *
  * @module dsh-turn-notify/client
  */

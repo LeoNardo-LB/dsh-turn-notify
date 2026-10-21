@@ -26,6 +26,19 @@
  *   已开时平台行为是新开标签页）。macOS terminal-notifier -open 同 toast
  *   模式语义。
  *
+ * 桌面客户端原生通道（desktopNotify=auto，默认）：
+ *   dsh 桌面 app 的内嵌页面以 dsh-app:// 协议服务（与 web 页同源注入
+ *   本插件 client 半），页面自识别上报 client=desktop:<uuid>（服务端另
+ *   以 Electron UA 指纹兜底——桌面 webview 的长轮询经 forwardWebRequest
+ *   转发、UA 保留）。桌面在场时通知改走原生：{kind:'notify'} 条目经同
+ *   一条 focus-wait 长轮询投递，页面内用 Web Notification API 弹原生通
+ *   知（归属桌面 app 本身，同官方更新通知身份）——点击 = OS 激活置前
+ *   + sessions.open 定位会话 + POST /turn-notify/clicked（宿主 start
+ *   dsh://open 幂等保险置前 + 广播聚焦让浏览器标签页后台同步切）。
+ *   展示后页面 POST /turn-notify/notify-ack；desktopNotifyAckMs 内无
+ *   ack（webview 断链/插件未加载）→ 平台通道兜底照发，宁重复不丢失。
+ *   桌面不在场（或 desktopNotify=off）→ 平台通道，行为与旧版一致。
+ *
  * Windows 音效（单音源原则，默认 = 系统通知音）：
  *   默认（soundFile 留空）用通知自带的系统通知音，不再叠 SoundPlayer；
  *   显式配置 soundFile 时才静音通知 + SoundPlayer 播自定义文件；
@@ -135,6 +148,10 @@ export interface Config {
   windowsToastAumid: 'auto' | 'powershell'
   /** 轮询挂起时长与在线判定阈值（毫秒）。 */
   presenceTimeoutMs: number
+  /** 桌面客户端在场时的原生通知通道（webview Web Notification API）。 */
+  desktopNotify: 'auto' | 'off'
+  /** desktop 原生通知投递后等待页面展示 ack 的超时（毫秒）。 */
+  desktopNotifyAckMs: number
   appName: string
   expireMs: number
   titleTemplate: string
@@ -189,6 +206,11 @@ export const Config: Schema<Config> = Schema.object({
     Schema.const('powershell' as const).description('恒用系统 PowerShell 的 AUMID（旧行为：通知归属显示 Windows PowerShell）'),
   ]).default('auto').description('Windows toast 的 AppUserModelID（通知归属/品牌显示）'),
   presenceTimeoutMs: Schema.number().default(15000).description('Web 页面在线判定阈值与 focus-wait 挂起时长基准（挂起 = 该值一半，夹在 0.5–10s）：发起通知时辅助选 balloon/toast；点击时刻的在线判定用瞬时真值（当下是否有挂起的长轮询）'),
+  desktopNotify: Schema.union([
+    Schema.const('auto' as const).description('桌面客户端在场时改走 webview 原生通知（Web Notification API，归属桌面 app；点击置前 + 直达会话），ack 超时自动回退平台通道'),
+    Schema.const('off' as const).description('恒用平台通道（PowerShell/notify-send/osascript），桌面在场也不切换'),
+  ]).default('auto').description('桌面客户端在场时的原生通知通道'),
+  desktopNotifyAckMs: Schema.number().default(1500).description('desktop 原生通知投递后等待页面展示 ack 的超时（毫秒）：超时未见 ack（webview 断链/插件未加载）则平台通道兜底照发（宁重复不丢失）'),
   appName: Schema.string().default('dsh').description('应用名（linux notify-send -a / 通知归属显示）'),
   expireMs: Schema.number().default(4000).description('桌面通知超时毫秒数（linux -t；macos/win 不支持则忽略）'),
   titleTemplate: Schema.string().default('{title}').description('通知标题模板，占位符 {title} {question} {sessionId}'),
@@ -225,6 +247,12 @@ const POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerSh
  * 显示名即 AUMID 字符串本身，故取短名 dsh。
  */
 const DSH_AUMID = 'dsh'
+
+/** 桌面客户端置前深链：桌面壳注册 dsh:// 协议，open-url 仅认 dsh://open（聚焦主窗口，无会话路由）。 */
+const DESKTOP_FOCUS_URL = 'dsh://open'
+
+/** Electron webview 的 UA 指纹（桌面 webview 长轮询经 forwardWebRequest 转发后 user-agent 保留）。 */
+const ELECTRON_UA_RE = /Electron\/|dsh-desktop\//i
 
 /** 宿主 sessionTitle 服务的最小读取面（可选服务，未挂载时 ctx.get 返回 undefined）。 */
 interface TitleServiceLike {
@@ -596,6 +624,45 @@ function runShellCommand(platform: Platform | undefined, cmd: string, onFail: (m
   run(shell, [flag, cmd], onFail)
 }
 
+/**
+ * desktop 客户端判定（纯函数，导出供测试）：页面自识别（client 参数带
+ * desktop: 前缀——client.js 检测 dsh-app: 协议后自动添加）为主，服务端
+ * UA 指纹兜底（桌面 webview 的长轮询经 forwardWebRequest 转发、UA 保留
+ * Electron 标记；覆盖 client.js 未加载/旧版本页面自识别缺席的场景）。
+ */
+export function isDesktopClient(clientParam: string, userAgent: string): boolean {
+  return clientParam.startsWith('desktop:') || ELECTRON_UA_RE.test(userAgent)
+}
+
+/**
+ * 通知通道路由（纯函数，导出供测试）：desktop 原生通道仅在 notifySend
+ * 开（通知面存在）、desktopNotify=auto 且桌面在场（desktop 类型长轮询
+ * 挂起中或 presence 新鲜）时启用；其余走平台通道（notifySend=false 时
+ * 两边都不发——无通知面语义）。
+ */
+export function chooseNotifyChannel(opts: { notifySend: boolean; desktopNotify: 'auto' | 'off'; desktopPresent: boolean }): 'desktop' | 'platform' | 'none' {
+  if (!opts.notifySend) return 'none'
+  if (opts.desktopNotify === 'auto' && opts.desktopPresent) return 'desktop'
+  return 'platform'
+}
+
+/**
+ * 原生通知静音判定（纯函数，导出供测试）：sound=false 全静音；显式
+ * soundFile → 通知静音、由宿主平台通道播该文件（单音源原则，与
+ * Windows toast 的音源决策一致）；默认 → 通知自带系统音。
+ */
+export function nativeNotifySilent(opts: { sound: boolean; explicitSoundFile: string }): boolean {
+  return !opts.sound || opts.explicitSoundFile !== ''
+}
+
+/** 桌面客户端置前的协议激活 argv（纯函数，导出供测试；未知平台无动作）。 */
+export function buildDesktopFocusArgs(platform: Platform | undefined): [string, string[]] | undefined {
+  if (platform === 'macos') return ['open', [DESKTOP_FOCUS_URL]]
+  if (platform === 'windows') return ['cmd', ['/c', 'start', '', DESKTOP_FOCUS_URL]]
+  if (platform === 'linux') return ['xdg-open', [DESKTOP_FOCUS_URL]]
+  return undefined
+}
+
 export function apply(ctx: Context, config: Config) {
   const platform = detectPlatform(config.platform)
   // 每行前缀带版本：调试时任意一行日志即可识别运行版本（含用户回报）
@@ -617,11 +684,11 @@ export function apply(ctx: Context, config: Config) {
    *   POST /turn-notify/focus —— 深链落地页广播聚焦：入队分发给所有长
    *        轮询页面（其它已开标签页同步切换）。
    */
-  interface FocusEntry { seq: number; sessionId: string; ts: number }
-  interface FocusWaiter { since: number; respond: (entries: FocusEntry[]) => void }
+  interface FocusEntry { seq: number; sessionId: string; ts: number; kind?: 'notify'; title?: string; body?: string; silent?: boolean }
+  interface FocusWaiter { since: number; desktop: boolean; respond: (entries: FocusEntry[]) => void }
   const focusQueue: FocusEntry[] = []
   const focusWaiters = new Set<FocusWaiter>()
-  const presenceSeen = new Map<string, number>()
+  const presenceSeen = new Map<string, { ts: number; desktop: boolean }>()
   // Date.now() 基数：跨宿主重启单调。从 0 计数会在重启后归零，而被未
   // 刷新的旧页面（客户端记着旧 lastSeq）在服务端过滤与客户端去重两处
   // 当作重复条目吞掉——重装插件后不刷新页面时点击被无声丢弃。
@@ -645,15 +712,64 @@ export function apply(ctx: Context, config: Config) {
     for (const w of waiters) w.respond(focusQueue.filter(e => e.seq > w.since))
   }
 
+  /**
+   * desktop 原生通知投递（ack-based）：{kind:'notify'} 条目入同一队列并
+   * 唤醒挂起长轮询（desktop webview 立即收到并弹原生通知；浏览器页面
+   * 跳过该类型条目——其通知由平台通道负责，不双响）；投出后等页面展示
+   * ack（POST /turn-notify/notify-ack），desktopNotifyAckMs 内未到达 →
+   * fallback 兜底（平台通道照发，宁重复不丢失）。返回 false 表示桌面不
+   * 在场（未投递，调用方直接走平台通道、零新增延迟）。
+   */
+  interface PendingNotifyAck { timer: ReturnType<typeof setTimeout>; fallback: () => void; sessionId: string }
+  const pendingNotifyAcks = new Map<number, PendingNotifyAck>()
+  const enqueueNotifyEntry = (title: string, body: string, sessionId: string, silent: boolean, fallback: () => void): boolean => {
+    if (!desktopLikelyPresent()) return false
+    trimFocusQueue()
+    const seq = ++focusSeq
+    focusQueue.push({ seq, sessionId, ts: Date.now(), kind: 'notify', title, body, silent })
+    const waiters = [...focusWaiters]
+    focusWaiters.clear()
+    for (const w of waiters) w.respond(focusQueue.filter(e => e.seq > w.since))
+    const timer = setTimeout(() => {
+      pendingNotifyAcks.delete(seq)
+      log('desktop 通知 ack 超时 → 平台通道兜底', 'session=' + sessionId)
+      fallback()
+    }, config.desktopNotifyAckMs)
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      ;(timer as { unref(): void }).unref()
+    }
+    pendingNotifyAcks.set(seq, { timer, fallback, sessionId })
+    return true
+  }
+
+  /** 桌面客户端点击原生通知后的宿主侧置前：dsh://open 协议激活 → 单实例 → 聚焦主窗口（幂等，OS 激活已置前时无感）。 */
+  const launchDesktopFocus = (): void => {
+    const target = buildDesktopFocusArgs(platform)
+    if (target === undefined) return
+    run(target[0], target[1], (m) => warnOnce('desktop-focus', m))
+  }
+
   /** 页面在线判据：任一 client 的长轮询最近到达时间在阈值内。 */
   const presenceFresh = (): boolean => {
     const now = Date.now()
     let fresh = false
-    for (const [client, ts] of presenceSeen) {
-      if (now - ts > config.presenceTimeoutMs * 3) presenceSeen.delete(client)
-      else if (now - ts < config.presenceTimeoutMs) fresh = true
+    for (const [client, p] of presenceSeen) {
+      if (now - p.ts > config.presenceTimeoutMs * 3) presenceSeen.delete(client)
+      else if (now - p.ts < config.presenceTimeoutMs) fresh = true
     }
     return fresh
+  }
+
+  /** 桌面 webview 在场：瞬时（desktop 类型长轮询挂起中）优先，presence 时间窗兜底（语义对齐 presenceLikelyOnline）。 */
+  const desktopLikelyPresent = (): boolean => {
+    for (const w of focusWaiters) {
+      if (w.desktop) return true
+    }
+    const now = Date.now()
+    for (const p of presenceSeen.values()) {
+      if (p.desktop && now - p.ts < config.presenceTimeoutMs) return true
+    }
+    return false
   }
 
   interface FocusRes {
@@ -670,14 +786,20 @@ export function apply(ctx: Context, config: Config) {
       path: '/turn-notify/focus-wait',
       handler: (req, res) => {
         const url = new URL((req as { url?: string }).url ?? '/', 'http://x')
-        const client = String(url.searchParams.get('client') ?? '').slice(0, 64)
+        const client = String(url.searchParams.get('client') ?? '').slice(0, 72)
         const since = Number(url.searchParams.get('since') ?? '0') || 0
-        if (client.length > 0) presenceSeen.set(client, Date.now())
+        // desktop 判定：页面自识别前缀为主，UA 指纹兜底（转发保留 UA）
+        const headers = (req as { headers?: Record<string, unknown> }).headers
+        const ua = typeof headers?.['user-agent'] === 'string' ? headers['user-agent'] : ''
+        const desktop = isDesktopClient(client, ua)
+        if (client.length > 0) presenceSeen.set(client, { ts: Date.now(), desktop })
         trimFocusQueue()
         const respond = (entries: FocusEntry[]): void => {
           try {
             res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-            res.end(JSON.stringify({ entries: entries.map(e => ({ seq: e.seq, sessionId: e.sessionId })) }))
+            res.end(JSON.stringify({ entries: entries.map(e => e.kind === 'notify'
+              ? { seq: e.seq, kind: 'notify', sessionId: e.sessionId, title: e.title ?? '', body: e.body ?? '', silent: e.silent === true }
+              : { seq: e.seq, sessionId: e.sessionId }) }))
           } catch { /* 客户端已断开：挂起响应作废 */ }
         }
         const pending = focusQueue.filter(e => e.seq > since)
@@ -694,6 +816,7 @@ export function apply(ctx: Context, config: Config) {
         }
         const waiter: FocusWaiter = {
           since,
+          desktop,
           respond: (entries) => {
             clearTimeout(timer)
             respond(entries)
@@ -780,11 +903,79 @@ export function apply(ctx: Context, config: Config) {
         r.on('error', () => finish(''))
       },
     })
-    log('聚焦通道已注册: GET /turn-notify/focus-wait（长轮询 ' + pollHoldMs + 'ms）+ POST /turn-notify/focus + POST /turn-notify/click')
+    // 以下两个路由共用的 JSON 体读取（上限 1MB；异常/缺席一律回 null）
+    const readJsonBody = (req: unknown, cb: (body: unknown) => void): void => {
+      const chunks: Buffer[] = []
+      const r = req as { on?: (ev: string, fn: (d?: Buffer) => void) => unknown }
+      if (typeof r.on !== 'function') {
+        cb(null)
+        return
+      }
+      let size = 0
+      r.on('data', (d) => {
+        size += (d ?? Buffer.alloc(0)).length
+        if (size <= 1_000_000) chunks.push(d ?? Buffer.alloc(0))
+      })
+      r.on('end', () => {
+        try {
+          cb(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch {
+          cb(null)
+        }
+      })
+      r.on('error', () => cb(null))
+    }
+    // desktop 原生通知的展示 ack：页面在 Web Notification 弹出后回执；
+    // 未按期到达 → enqueueNotifyEntry 的超时兜底走平台通道（宁重复不丢失）
+    const disposeNotifyAck = wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/turn-notify/notify-ack',
+      handler: (req, res) => {
+        readJsonBody(req, (body) => {
+          const seq = (body as { seq?: unknown } | null)?.seq
+          if (typeof seq === 'number' && Number.isInteger(seq)) {
+            const pending = pendingNotifyAcks.get(seq)
+            if (pending !== undefined) {
+              clearTimeout(pending.timer)
+              pendingNotifyAcks.delete(seq)
+              log('desktop 通知 ack →', 'seq=' + seq, 'session=' + pending.sessionId)
+            }
+          }
+          try {
+            res.writeHead(204).end()
+          } catch { /* 客户端已断开 */ }
+        })
+      },
+    })
+    // desktop 原生通知点击回执：页面已 sessions.open 切会话；宿主补两件
+    // 事——广播聚焦（浏览器标签页后台同步切到目标会话）+ dsh://open
+    // 协议激活把桌面窗口幂等置前（OS 激活未生效时的保险丝）
+    const disposeClicked = wsCtx.webServer.register({
+      kind: 'exact',
+      path: '/turn-notify/clicked',
+      handler: (req, res) => {
+        readJsonBody(req, (body) => {
+          const sessionId = (body as { sessionId?: unknown } | null)?.sessionId
+          if (typeof sessionId === 'string' && sessionId.length > 0 && sessionId.length <= 256) {
+            log('desktop 原生通知点击 → 广播聚焦 + 置前', 'session=' + sessionId)
+            enqueueFocus(sessionId)
+          }
+          launchDesktopFocus()
+          try {
+            res.writeHead(204).end()
+          } catch { /* 客户端已断开 */ }
+        })
+      },
+    })
+    log('聚焦通道已注册: GET /turn-notify/focus-wait（长轮询 ' + pollHoldMs + 'ms）+ POST /turn-notify/focus + POST /turn-notify/click + POST /turn-notify/notify-ack + POST /turn-notify/clicked')
     wsCtx.effect(() => () => {
       disposeWait()
       disposePost()
       disposeClick()
+      disposeNotifyAck()
+      disposeClicked()
+      for (const [, p] of pendingNotifyAcks) clearTimeout(p.timer)
+      pendingNotifyAcks.clear()
       for (const w of [...focusWaiters]) w.respond([])
     }, 'turn-notify: focus routes')
   })
@@ -1068,6 +1259,26 @@ export function apply(ctx: Context, config: Config) {
     platform === 'windows' && config.notifySend && config.sound
     && (override !== '' ? override : config.soundFile) === ''
 
+  /**
+   * 通知面投递总入口（轮次结束 + 提问共用）：desktop 原生通道优先
+   * （desktopNotify=auto 且桌面在场）——经长轮询投递 {kind:'notify'}
+   * 条目 + ack 计时，超时/不在场走平台通道 sendDesktop（行为与旧版
+   * 一致）。soundFileOverride 语义不变（提问用 questionSoundFile）。
+   */
+  const deliverDesktopNotify = (title: string, body: string, vars: { title: string; question: string; sessionId: string }, soundFileOverride = ''): void => {
+    if (!config.notifySend) return
+    if (chooseNotifyChannel({ notifySend: config.notifySend, desktopNotify: config.desktopNotify, desktopPresent: desktopLikelyPresent() }) === 'desktop') {
+      const explicitFile = soundFileOverride !== '' ? soundFileOverride : config.soundFile
+      const silent = nativeNotifySilent({ sound: config.sound, explicitSoundFile: explicitFile })
+      log('desktop 原生通知投递', 'session=' + vars.sessionId, 'silent=' + silent)
+      const armed = enqueueNotifyEntry(title, body, vars.sessionId, silent, () => {
+        sendDesktop(title, body, vars, soundFileOverride)
+      })
+      if (armed) return
+    }
+    sendDesktop(title, body, vars, soundFileOverride)
+  }
+
   const info = new Map<string, SessionInfo>()
   const getInfo = (id: string): SessionInfo => {
     let v = info.get(id)
@@ -1260,7 +1471,7 @@ export function apply(ctx: Context, config: Config) {
 
     log('agent idle → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId)
 
-    if (config.notifySend) sendDesktop(title, body, finalVars, '')
+    deliverDesktopNotify(title, body, finalVars, '')
     if (config.sound && !windowsSystemAudioCovers('')) sendSound(finalVars)
     if (config.bell) process.stdout.write('\x07')
     if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
@@ -1343,7 +1554,7 @@ export function apply(ctx: Context, config: Config) {
       const body = render(config.questionBodyTemplate, vars)
       const finalVars = { title, question: body, sessionId }
       log('user question → 通知', 'title=' + title, 'question=' + body, 'session=' + sessionId)
-      if (config.notifySend) sendDesktop(title, body, finalVars, config.questionSoundFile)
+      deliverDesktopNotify(title, body, finalVars, config.questionSoundFile)
       if (config.sound && !windowsSystemAudioCovers(config.questionSoundFile)) sendSound(finalVars, config.questionSoundFile)
       if (config.bell) process.stdout.write('\x07')
       if (config.command) runShellCommand(platform, render(config.command, finalVars), (m) => warnOnce('command', m))
@@ -1436,7 +1647,8 @@ export function apply(ctx: Context, config: Config) {
     command: config.command ? '(custom)' : '(off)', rootOnly: config.rootOnly,
     questionChars: config.questionChars, skipGoalRounds: config.skipGoalRounds,
     goalQuietMs: config.goalQuietMs, waitForSubagents: config.waitForSubagents,
-    subagentQuietMs: config.subagentQuietMs,
+    subagentQuietMs: config.subagentQuietMs, desktopNotify: config.desktopNotify,
+    desktopNotifyAckMs: config.desktopNotifyAckMs,
   }))
 
   ctx.effect(() => () => {

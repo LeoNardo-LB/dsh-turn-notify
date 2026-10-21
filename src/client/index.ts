@@ -16,6 +16,13 @@
  *   3. 会话列表竞态重试：新开页面的会话列表异步晚到，open() 对未列出
  *      会话直接抛错——聚焦带重试（250ms 间隔、至多 15s），列表到达
  *      即成功；旧实现单次失败即吞掉，导致落地页停在恢复的旧会话上。
+ *   4. 桌面原生通知（desktop 半）：dsh 桌面 app 的内嵌页面（dsh-app:
+ *      协议）自识别，focus-wait 上报 client=desktop:<uuid>；服务端据此
+ *      把 {kind:'notify'} 条目投进长轮询，本页用 Web Notification API
+ *      弹原生通知——展示后 POST /turn-notify/notify-ack（服务端超时未
+ *      见 ack 走平台通道兜底）；点击 = sessions.open 定位会话 + POST
+ *      /turn-notify/clicked（宿主广播聚焦 + dsh://open 幂等置前桌面
+ *      窗口）。浏览器页面（http/https）跳过 notify 条目，不双响。
  *
  * @module dsh-turn-notify/client
  */
@@ -48,6 +55,20 @@ const RETRY_MAX = 60
 /** 轮询失败（断连/服务重启）后的退避。 */
 const POLL_ERROR_BACKOFF_MS = 2000
 
+/** 桌面 app 内嵌页面判定：桌面壳以 dsh-app:// 协议服务前端（preload 另暴露 __DSH_LOCALE__）；浏览器页面是 http(s)。 */
+const isDesktopPage = (): boolean =>
+  window.location.protocol === 'dsh-app:' || '__DSH_LOCALE__' in window
+
+/** Web Notification API 句柄（经 window 引用取，不引入新的自由全局名；测试可经 window 注入伪造）。 */
+type NativeNotificationCtor = (new (title: string, options?: { body?: string; silent?: boolean }) => {
+  addEventListener(ev: string, fn: () => void): void
+  close(): void
+}) & {
+  permission?: string
+  requestPermission?: () => Promise<string>
+}
+const NativeNotification: NativeNotificationCtor | undefined = (window as unknown as { Notification?: NativeNotificationCtor }).Notification
+
 export function apply(ctx: ClientContext): void {
   // 每行前缀带版本（与宿主端一致，调试时任意一行可识别版本）
   const log = (...a: unknown[]) => console.log('[turn-notify/client v' + TN_VERSION + ']', ...a)
@@ -76,8 +97,62 @@ export function apply(ctx: ClientContext): void {
     attempt()
   }
 
+  /** desktop 原生通知（{kind:'notify'} 条目）：弹出 + 展示 ack + 点击聚焦/置前回执。 */
+  const showNativeNotify = (e: { seq: number; title?: unknown; body?: unknown; sessionId?: unknown; silent?: unknown }): void => {
+    if (NativeNotification === undefined) {
+      log('Notification API 不可用，跳过原生通知 seq=' + e.seq + '（服务端超时后平台通道兜底）')
+      return
+    }
+    const fire = (): void => {
+      if (NativeNotification === undefined || NativeNotification.permission !== 'granted') {
+        log('通知权限未授予，跳过原生通知 seq=' + e.seq + '（服务端超时后平台通道兜底）')
+        return
+      }
+      const title = typeof e.title === 'string' && e.title.length > 0 ? e.title : 'DSH'
+      const body = typeof e.body === 'string' ? e.body : ''
+      let notification: InstanceType<NativeNotificationCtor>
+      try {
+        notification = new NativeNotification(title, { body, silent: e.silent === true })
+      } catch (err) {
+        log('Notification 构造失败:', String(err))
+        return
+      }
+      const ack = (): void => {
+        fetch('/turn-notify/notify-ack', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ seq: e.seq }),
+        }).catch(() => {})
+      }
+      // 展示回执以 show 事件为准；个别平台事件缺失时短定时器兜底
+      //（ack 端点幂等，重复到达无害）
+      notification.addEventListener('show', ack)
+      setTimeout(ack, 400)
+      notification.addEventListener('click', () => {
+        if (typeof e.sessionId === 'string' && e.sessionId.length > 0) focusSession(e.sessionId, 'native-notify')
+        window.focus()
+        fetch('/turn-notify/clicked', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({}),
+        }).catch(() => {})
+      })
+    }
+    if (NativeNotification.permission === 'granted') {
+      fire()
+    } else if (typeof NativeNotification.requestPermission === 'function') {
+      // Electron 桌面壳的权限检查器对非 media 权限一律放行；保险起见
+      // 显式请求一次（浏览器路径不走本函数）
+      NativeNotification.requestPermission().then((p) => {
+        if (p === 'granted') fire()
+      }).catch(() => {})
+    }
+  }
+
   // ---- 1) 长轮询：点击聚焦 + presence ----
   let lastSeq = 0
+  // desktop 页面上报 client=desktop:<uuid>（服务端据此路由原生通知/置前）
+  const clientKind = isDesktopPage() ? 'desktop:' : ''
   const clientId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2)
@@ -86,16 +161,22 @@ export function apply(ctx: ClientContext): void {
     if (stopped) return
     let ok = false
     try {
-      const res = await fetch('/turn-notify/focus-wait?client=' + clientId + '&since=' + lastSeq)
+      const res = await fetch('/turn-notify/focus-wait?client=' + clientKind + clientId + '&since=' + lastSeq)
       if (res.ok) {
         ok = true
-        const data = await res.json().catch(() => null) as { entries?: { seq?: unknown; sessionId?: unknown }[] } | null
+        const data = await res.json().catch(() => null) as { entries?: { seq?: unknown; sessionId?: unknown; kind?: unknown; title?: unknown; body?: unknown; silent?: unknown }[] } | null
         if (data !== null && Array.isArray(data.entries)) {
           for (const e of data.entries) {
             // 去重守卫：只消费比本地进度新的条目（服务端已按 since 过滤，
             // 此处防中间层/旧响应重放导致重复聚焦）
             if (typeof e.seq !== 'number' || e.seq <= lastSeq) continue
             lastSeq = e.seq
+            if (e.kind === 'notify') {
+              // desktop 原生通知条目：仅桌面页面渲染（浏览器页面的通知
+              // 由宿主平台通道负责，跳过避免双响）
+              if (clientKind !== '') showNativeNotify(e as { seq: number; title?: unknown; body?: unknown; sessionId?: unknown; silent?: unknown })
+              continue
+            }
             if (typeof e.sessionId === 'string' && e.sessionId.length > 0) focusSession(e.sessionId, 'focus-wait')
           }
         }
@@ -144,5 +225,5 @@ export function apply(ctx: ClientContext): void {
     document.title = (document.title || 'DSH') + ' — DSH'
   }
 
-  log('loaded; client=' + clientId)
+  log('loaded; client=' + clientKind + clientId)
 }

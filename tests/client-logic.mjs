@@ -20,9 +20,10 @@ function loadBundle(env) {
   const disposers = []
   let mod = null
   const window = {
-    location: { hash: env.hash ?? '', pathname: '/', search: '' },
+    location: { hash: env.hash ?? '', pathname: '/', search: '', protocol: env.protocol ?? 'https:' },
     focus: env.windowFocus ?? (() => {}),
   }
+  if (env.Notification !== undefined) window.Notification = env.Notification
   const consoleLines = []
   const captureConsole = {
     log: (...a) => { consoleLines.push(a.map(String).join(' ')) },
@@ -152,6 +153,118 @@ console.log('--- 3) 深链广播 ---')
   assert.equal(posts[0].url, '/turn-notify/focus', '广播目标 URL')
   assert.equal(JSON.parse(posts[0].body).sessionId, 'sess-broadcast-1', '广播体应含 sessionId')
   console.log('BROADCAST-OK')
+}
+
+// ---- 4) desktop 自识别：dsh-app: 协议 → client=desktop:<uuid> ----
+console.log('--- 4) desktop 自识别上报 ---')
+{
+  const urls = []
+  let release
+  const gate = new Promise((r) => { release = r })
+  const { dispose } = loadBundle({
+    hash: '',
+    protocol: 'dsh-app:',
+    isListed: () => true,
+    fetch: async (url) => {
+      const s = String(url)
+      if (s.includes('focus-wait')) { urls.push(s); await gate; return { ok: true, json: async () => ({ entries: [] }) } }
+      return { ok: true, json: async () => ({ entries: [] }) }
+    },
+  })
+  await sleep(100)
+  dispose()
+  const w = urls[0]
+  assert.ok(w !== undefined, '应发起 focus-wait')
+  assert.match(w, /client=desktop:[0-9a-f-]+/, '桌面页面 client 参数应带 desktop: 前缀（服务端据此路由原生通知/置前）')
+  release()
+  console.log('DESKTOP-SELF-ID-OK')
+}
+
+// ---- 5) desktop notify 条目 → Web Notification + 展示 ack + 点击聚焦/回执 ----
+console.log('--- 5) notify 条目 → 原生通知 + ack + clicked ---')
+{
+  const instances = []
+  const posts = []
+  class FakeNotification {
+    static permission = 'granted'
+    static requestPermission = async () => 'granted'
+    constructor(title, options) {
+      this.title = title
+      this.options = options
+      this.listeners = new Map()
+      instances.push(this)
+    }
+    addEventListener(ev, fn) {
+      if (!this.listeners.has(ev)) this.listeners.set(ev, [])
+      this.listeners.get(ev).push(fn)
+    }
+    close() {}
+  }
+  const fire = (n, ev) => { for (const fn of n.listeners.get(ev) ?? []) fn() }
+  let served = false
+  const { opened, dispose } = loadBundle({
+    hash: '',
+    protocol: 'dsh-app:',
+    isListed: () => true,
+    Notification: FakeNotification,
+    fetch: async (url, opts) => {
+      if (opts?.method === 'POST') { posts.push({ url: String(url), body: opts.body }); return { ok: true, json: async () => ({}) } }
+      // 首轮投 1 条 notify 条目，之后空
+      const entries = served ? [] : [{ seq: 99001, kind: 'notify', sessionId: 'sess-native-1', title: '原生标题', body: '原生正文', silent: true }]
+      served = true
+      return { ok: true, json: async () => ({ entries }) }
+    },
+  })
+  await sleep(150)
+  assert.equal(instances.length, 1, '应恰好构造 1 个原生 Notification')
+  assert.equal(instances[0].title, '原生标题')
+  assert.equal(instances[0].options.body, '原生正文')
+  assert.equal(instances[0].options.silent, true, '服务端下发的静音位应透传')
+  fire(instances[0], 'show')
+  await sleep(50)
+  const ackPost = posts.find((p) => p.url.includes('/turn-notify/notify-ack'))
+  assert.ok(ackPost !== undefined, '展示后应 POST notify-ack')
+  assert.equal(JSON.parse(ackPost.body).seq, 99001, 'ack 体应带条目 seq')
+  fire(instances[0], 'click')
+  await sleep(50)
+  assert.ok(opened.includes('sess-native-1'), '点击应 open 目标会话')
+  const clickPost = posts.find((p) => p.url.includes('/turn-notify/clicked'))
+  assert.ok(clickPost !== undefined, '点击应 POST clicked（宿主广播聚焦 + dsh://open 置前）')
+  dispose()
+  console.log('NATIVE-NOTIFY-OK')
+}
+
+// ---- 6) 浏览器页面跳过 notify 条目（不双响）；focus 条目照常 ----
+console.log('--- 6) 浏览器跳过 notify 条目 ---')
+{
+  const instances = []
+  class FakeNotification {
+    static permission = 'granted'
+    constructor() { instances.push(this) }
+    addEventListener() {}
+    close() {}
+  }
+  let phase = 0
+  const { opened, dispose } = loadBundle({
+    hash: '',
+    protocol: 'https:',
+    isListed: () => true,
+    Notification: FakeNotification,
+    fetch: async () => {
+      // 首轮 notify 条目，次轮 focus 条目，之后空
+      const entries = phase === 0
+        ? [{ seq: 99001, kind: 'notify', sessionId: 'sess-should-not-open', title: 'T', body: 'B', silent: true }]
+        : phase === 1 ? [{ seq: 99002, sessionId: 'sess-focus-1' }] : []
+      phase++
+      return { ok: true, json: async () => ({ entries }) }
+    },
+  })
+  await sleep(200)
+  dispose()
+  assert.equal(instances.length, 0, '浏览器页面不得构造原生通知（其通知由宿主平台通道负责）')
+  assert.ok(!opened.includes('sess-should-not-open'), 'notify 条目不得触发 open')
+  assert.ok(opened.includes('sess-focus-1'), 'focus 条目照常触发 open（回归）')
+  console.log('BROWSER-SKIP-NOTIFY-OK')
 }
 
 console.log('ALL-PASS')

@@ -26,6 +26,19 @@
  *   已开时平台行为是新开标签页）。macOS terminal-notifier -open 同 toast
  *   模式语义。
  *
+ * 桌面客户端原生通道（desktopNotify=auto，默认）：
+ *   dsh 桌面 app 的内嵌页面以 dsh-app:// 协议服务（与 web 页同源注入
+ *   本插件 client 半），页面自识别上报 client=desktop:<uuid>（服务端另
+ *   以 Electron UA 指纹兜底——桌面 webview 的长轮询经 forwardWebRequest
+ *   转发、UA 保留）。桌面在场时通知改走原生：{kind:'notify'} 条目经同
+ *   一条 focus-wait 长轮询投递，页面内用 Web Notification API 弹原生通
+ *   知（归属桌面 app 本身，同官方更新通知身份）——点击 = OS 激活置前
+ *   + sessions.open 定位会话 + POST /turn-notify/clicked（宿主 start
+ *   dsh://open 幂等保险置前 + 广播聚焦让浏览器标签页后台同步切）。
+ *   展示后页面 POST /turn-notify/notify-ack；desktopNotifyAckMs 内无
+ *   ack（webview 断链/插件未加载）→ 平台通道兜底照发，宁重复不丢失。
+ *   桌面不在场（或 desktopNotify=off）→ 平台通道，行为与旧版一致。
+ *
  * Windows 音效（单音源原则，默认 = 系统通知音）：
  *   默认（soundFile 留空）用通知自带的系统通知音，不再叠 SoundPlayer；
  *   显式配置 soundFile 时才静音通知 + SoundPlayer 播自定义文件；
@@ -94,6 +107,7 @@ import Schema from '@deepseek-ai/schemastery';
 export declare const name = "turn-notify";
 export declare const inject: never[];
 export type PlatformChoice = 'auto' | 'linux' | 'macos' | 'windows';
+type Platform = 'linux' | 'macos' | 'windows';
 export interface Config {
     platform: PlatformChoice;
     notifySend: boolean;
@@ -118,6 +132,10 @@ export interface Config {
     windowsToastAumid: 'auto' | 'powershell';
     /** 轮询挂起时长与在线判定阈值（毫秒）。 */
     presenceTimeoutMs: number;
+    /** 桌面客户端在场时的原生通知通道（webview Web Notification API）。 */
+    desktopNotify: 'auto' | 'off';
+    /** desktop 原生通知投递后等待页面展示 ack 的超时（毫秒）。 */
+    desktopNotifyAckMs: number;
     appName: string;
     expireMs: number;
     titleTemplate: string;
@@ -206,4 +224,34 @@ export declare function buildRaiseBrowserScript(): string;
 export declare function buildSoundScript(file: string): string;
 /** -EncodedCommand 编码（UTF-16LE base64）。 */
 export declare function encodePs(script: string): string;
+/**
+ * desktop 客户端判定（纯函数，导出供测试）：页面自识别（client 参数带
+ * desktop: 前缀——client.js 检测 dsh-app: 协议后自动添加）为主，服务端
+ * UA 指纹兜底（桌面 webview 的长轮询经 forwardWebRequest 转发、UA 保留
+ * Electron 标记；覆盖 client.js 未加载/旧版本页面自识别缺席的场景）。
+ */
+export declare function isDesktopClient(clientParam: string, userAgent: string): boolean;
+/**
+ * 通知通道路由（纯函数，导出供测试）：desktop 原生通道仅在 notifySend
+ * 开（通知面存在）、desktopNotify=auto 且桌面在场（desktop 类型长轮询
+ * 挂起中或 presence 新鲜）时启用；其余走平台通道（notifySend=false 时
+ * 两边都不发——无通知面语义）。
+ */
+export declare function chooseNotifyChannel(opts: {
+    notifySend: boolean;
+    desktopNotify: 'auto' | 'off';
+    desktopPresent: boolean;
+}): 'desktop' | 'platform' | 'none';
+/**
+ * 原生通知静音判定（纯函数，导出供测试）：sound=false 全静音；显式
+ * soundFile → 通知静音、由宿主平台通道播该文件（单音源原则，与
+ * Windows toast 的音源决策一致）；默认 → 通知自带系统音。
+ */
+export declare function nativeNotifySilent(opts: {
+    sound: boolean;
+    explicitSoundFile: string;
+}): boolean;
+/** 桌面客户端置前的协议激活 argv（纯函数，导出供测试；未知平台无动作）。 */
+export declare function buildDesktopFocusArgs(platform: Platform | undefined): [string, string[]] | undefined;
 export declare function apply(ctx: Context, config: Config): void;
+export {};
