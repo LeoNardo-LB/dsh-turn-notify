@@ -30,6 +30,8 @@
 interface ClientContext {
     sessions: unknown;
     effect(fn: () => unknown, label?: string): void;
+    /** 取可选服务（DSH 0.2.2 起会话切换在 uiWorkspace 上）。 */
+    get?(name: string): unknown;
 }
 export declare const inject: string[];
 /** 深链 hash 前缀（与服务端 deepLinkHash 配置一致）。 */

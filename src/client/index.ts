@@ -30,11 +30,19 @@
 interface ClientContext {
   sessions: unknown
   effect(fn: () => unknown, label?: string): void
+  /** 取可选服务（DSH 0.2.2 起会话切换在 uiWorkspace 上）。 */
+  get?(name: string): unknown
 }
 
 /** sessions 服务最小面（完整契约在 dsh-client-runtime）。 */
 interface SessionsLike {
-  open(id: string): void
+  /** DSH 0.2.2 起客户端不再提供 open，保留旧版兼容。 */
+  open?(id: string): void
+}
+
+/** uiWorkspace 服务最小面（DSH 0.2.2 的会话切换入口）。 */
+interface UiWorkspaceLike {
+  openSession(id: string): void
 }
 
 export const inject = ['sessions']
@@ -74,6 +82,22 @@ export function apply(ctx: ClientContext): void {
   const log = (...a: unknown[]) => console.log('[turn-notify/client v' + TN_VERSION + ']', ...a)
 
   const sessions = ctx.sessions as SessionsLike
+  /**
+   * 切到指定会话：DSH 0.2.2 是 uiWorkspace.openSession(id)（旧版才有
+   * sessions.open）。两者都试，避免版本差异下静默失败。
+   */
+  const openSession = (sessionId: string): void => {
+    const ui = typeof ctx.get === 'function' ? (ctx.get('uiWorkspace') as UiWorkspaceLike | undefined) : undefined
+    if (ui !== undefined && ui !== null && typeof ui.openSession === 'function') {
+      ui.openSession(sessionId)
+      return
+    }
+    if (sessions !== undefined && sessions !== null && typeof sessions.open === 'function') {
+      sessions.open(sessionId)
+      return
+    }
+    throw new Error('no session-open API (uiWorkspace.openSession / sessions.open)')
+  }
   let stopped = false
 
   /** 定位到会话；列表未列出时按 RETRY_MS 重试（新开页面列表竞态）。 */
@@ -82,7 +106,7 @@ export function apply(ctx: ClientContext): void {
     const attempt = (): void => {
       if (stopped) return
       try {
-        sessions.open(sessionId)
+        openSession(sessionId)
         window.focus()
         log('focused session', sessionId, 'via', from)
       } catch (err) {

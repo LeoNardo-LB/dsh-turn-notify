@@ -273,6 +273,16 @@ const TOAST_ICON_PATH = (() => {
   return ''
 })()
 /** 同一图标的 file:// URL（toast 内联图片需要 URI 形式）。 */
+/** 点击原生通知后的置前脚本（user32 ALT 技巧；Electron 自己的 focus 抢不到前台）。 */
+const FOCUS_RAISE_SCRIPT = (() => {
+  try {
+    const candidate = join(dirname(fileURLToPath(import.meta.url)), 'focus-raise.ps1')
+    return existsSync(candidate) ? candidate : ''
+  } catch {
+    return ''
+  }
+})()
+
 const TOAST_ICON = (() => {
   try {
     return TOAST_ICON_PATH === '' ? '' : pathToFileURL(TOAST_ICON_PATH).href
@@ -843,6 +853,15 @@ export function apply(ctx: Context, config: Config) {
 
   /** 桌面客户端点击原生通知后的宿主侧置前：dsh://open 协议激活 → 单实例 → 聚焦主窗口（幂等，OS 激活已置前时无感）。 */
   const launchDesktopFocus = (): void => {
+    // Windows：优先跑独立脚本（user32 ALT 技巧置前）——dsh://open 的单实例
+    // 转发在 Windows 前台锁下拿不到焦点；脚本缺失才退回协议激活。
+    if (platform === 'windows' && FOCUS_RAISE_SCRIPT !== '') {
+      run('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', FOCUS_RAISE_SCRIPT, 'dshfocus://focus'], () => {
+        const target = buildDesktopFocusArgs(platform)
+        if (target !== undefined) run(target[0], target[1], (m) => warnOnce('desktop-focus', m))
+      })
+      return
+    }
     const target = buildDesktopFocusArgs(platform)
     if (target === undefined) return
     run(target[0], target[1], (m) => warnOnce('desktop-focus', m))
