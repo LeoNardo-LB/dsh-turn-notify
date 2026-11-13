@@ -12,6 +12,11 @@ function Write-Probe($msg) {
     "[$(Get-Date -Format 'HH:mm:ss.fff')] $msg" | Add-Content $logFile
   } catch { }
 }
+# 宿主由 dsh-desktop-host 启动，环境里带着 ELECTRON_RUN_AS_NODE=1；不清掉它，
+# 下面 Start-Process 'dsh://open' 会把 Electron 当成 Node 跑（Cannot find module），
+# 窗口永远不会被 Electron show，退化成 Win32 ShowWindow → 渲染进程仍是 hidden（假死）。
+Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+Remove-Item Env:\ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue
 Write-Probe ('start url=' + $Url)
 
 function Get-Query($u) {
