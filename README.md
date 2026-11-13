@@ -180,6 +180,13 @@ WinRT 类型加载——即解码/解析/转义全部正确，**仅 toast 的最
 - **切会话的 API**：DSH 0.2.2 客户端没有 `sessions.open`（会抛 `TypeError:
   sessions.open is not a function`，而且被重试逻辑吞掉），切换会话走
   `uiWorkspace.openSession(id)`；客户端两代都试，旧版才用 `sessions.open`。
+- **为什么必须让 Electron 自己 show**：宿主进程带着 `ELECTRON_RUN_AS_NODE=1`，
+  脚本里直接 `Start-Process 'dsh://open'` 会把 Electron 当 Node 跑（`Cannot find
+  module ... dsh:\open`）而退出，窗口永远不会被 show；退化成 Win32 `ShowWindow`
+  后，Chromium 仍认为页面 `hidden`（`document.visibilityState === 'hidden'`），
+  渲染进程不刷新也不处理输入——就是"窗口假死但进程正常"。脚本启动时会先清掉
+  `ELECTRON_RUN_AS_NODE` / `ELECTRON_NO_ATTACH_CONSOLE`，保证协议拉起的是真正的
+  Electron 实例（实测 `hidden → visible`，260ms 内完成）。
 - **置前**：`dsh://open` 的单实例转发在 Windows 前台锁下拿不到焦点，宿主收到
   `/turn-notify/clicked` 时改跑 `lib/focus-raise.ps1`（ALT 技巧 + `SetForegroundWindow`）；
   脚本缺失才回退协议激活。同一脚本也供 `dshfocus://` 协议复用（可选）。
