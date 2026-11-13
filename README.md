@@ -175,6 +175,15 @@ Windows 验证状态（Linux pwsh 7.4 + 官方 Parser 三层工装
 WinRT 类型加载——即解码/解析/转义全部正确，**仅 toast 的最终显示
 仍需真 Windows 真机确认**；如有问题请提 issue。
 
+## 实现注记（0.2.2-dev.18+）
+
+- **切会话的 API**：DSH 0.2.2 客户端没有 `sessions.open`（会抛 `TypeError:
+  sessions.open is not a function`，而且被重试逻辑吞掉），切换会话走
+  `uiWorkspace.openSession(id)`；客户端两代都试，旧版才用 `sessions.open`。
+- **置前**：`dsh://open` 的单实例转发在 Windows 前台锁下拿不到焦点，宿主收到
+  `/turn-notify/clicked` 时改跑 `lib/focus-raise.ps1`（ALT 技巧 + `SetForegroundWindow`）；
+  脚本缺失才回退协议激活。同一脚本也供 `dshfocus://` 协议复用（可选）。
+
 ## 噪音过滤
 
 - rootOnly（默认开）：只通知根会话（判据 `origin !== 'subagent'`，
