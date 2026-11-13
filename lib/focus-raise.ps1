@@ -1,12 +1,16 @@
 # dsh-turn-notify: 点击通知后的落点
 # 参数（可选）：dshfocus://focus?port=<宿主端口>&session=<会话ID>
 #   1) POST /turn-notify/focus → 已开的桌面页面切到目标会话
-#   2) 按标题找 DSH 主窗口（隐藏/托盘同样能找到），AttachThreadInput + user32 抢前台
+#   2) 窗口收在托盘时，先让 Electron 自己 show（dsh://open），再只做"抢前台"——
+#      直接用 Win32 ShowWindow 拉起，渲染进程不会从 hidden 恢复，窗口会"无响应"。
 param([Parameter(Mandatory = $false)][string]$Url = '')
 
 $logFile = Join-Path $env:TEMP 'dsh-focus-raise.log'
 function Write-Probe($msg) {
-  try { "[$(Get-Date -Format 'HH:mm:ss.fff')] $msg" | Add-Content $logFile } catch { }
+  try {
+    if ((Test-Path $logFile) -and (Get-Item $logFile).Length -gt 262144) { Remove-Item $logFile -Force }
+    "[$(Get-Date -Format 'HH:mm:ss.fff')] $msg" | Add-Content $logFile
+  } catch { }
 }
 Write-Probe ('start url=' + $Url)
 
@@ -47,6 +51,7 @@ public static class DshRaise {
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
@@ -57,6 +62,7 @@ public static class DshRaise {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr res);
   public static IntPtr Find(string needle) {
     IntPtr found = IntPtr.Zero;
     EnumWindows((h, l) => {
@@ -67,37 +73,60 @@ public static class DshRaise {
     }, IntPtr.Zero);
     return found;
   }
-  /** AttachThreadInput 到当前前台线程后再抢前台——绕过前台锁最可靠的做法。 */
+  public static bool Responds(IntPtr h) {
+    IntPtr res;
+    return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x0002 | 0x0001, 1200, out res) != IntPtr.Zero;
+  }
+  /** 挂到当前前台线程再抢前台；调用前窗口应已可见（由 Electron 负责 show）。 */
   public static void Force(IntPtr hwnd) {
-    ShowWindow(hwnd, 9);
     uint pid;
     IntPtr fg = GetForegroundWindow();
     uint fgThread = GetWindowThreadProcessId(fg, out pid);
     uint me = GetCurrentThreadId();
-    bool attached = fgThread != 0 && AttachThreadInput(me, fgThread, true);
-    keybd_event(0x12, 0, 0, UIntPtr.Zero);
-    keybd_event(0x12, 0, 2, UIntPtr.Zero);
-    SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
-    BringWindowToTop(hwnd);
-    SetForegroundWindow(hwnd);
-    SwitchToThisWindow(hwnd, true);
-    SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
-    if (attached) AttachThreadInput(me, fgThread, false);
+    bool attached = false;
+    try {
+      if (fgThread != 0 && fgThread != me) attached = AttachThreadInput(me, fgThread, true);
+      keybd_event(0x12, 0, 0, UIntPtr.Zero);
+      keybd_event(0x12, 0, 2, UIntPtr.Zero);
+      BringWindowToTop(hwnd);
+      SetForegroundWindow(hwnd);
+      SwitchToThisWindow(hwnd, true);
+    } finally {
+      if (attached) AttachThreadInput(me, fgThread, false);
+    }
   }
 }
 '@
 
 $hwnd = [DshRaise]::Find('DeepSeek Harness')
-Write-Probe ('hwnd=' + $hwnd)
-if ($hwnd -ne [IntPtr]::Zero) {
-  [DshRaise]::Force($hwnd)
-  $ok = $false
-  for ($i = 0; $i -lt 12; $i++) {
-    Start-Sleep -Milliseconds 120
-    if ([DshRaise]::GetForegroundWindow() -eq $hwnd) { $ok = $true; break }
-    [DshRaise]::Force($hwnd)
-  }
-  Write-Probe ('raised ok=' + $ok)
-} else {
+Write-Probe ('hwnd=' + $hwnd + ' visible=' + $(if ($hwnd -ne [IntPtr]::Zero) { [DshRaise]::IsWindowVisible($hwnd) } else { 'n/a' }))
+
+if ($hwnd -eq [IntPtr]::Zero) {
   Write-Probe 'window not found'
+  exit 0
 }
+
+# 1) 托盘里的窗口：交给 Electron show（渲染进程才会从 hidden 恢复）
+if (-not [DshRaise]::IsWindowVisible($hwnd)) {
+  try { Start-Process 'dsh://open' } catch { }
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 100
+    if ([DshRaise]::IsWindowVisible($hwnd)) { break }
+  }
+  Write-Probe ('after dsh://open visible=' + [DshRaise]::IsWindowVisible($hwnd))
+  # 兜底：Electron 没能 show（少见）才自己显示
+  if (-not [DshRaise]::IsWindowVisible($hwnd)) {
+    [DshRaise]::ShowWindow($hwnd, 9) | Out-Null
+    Start-Sleep -Milliseconds 150
+    Write-Probe 'fallback ShowWindow'
+  }
+}
+
+# 2) 只抢前台，重复到真的成为前台窗口
+$ok = $false
+for ($i = 0; $i -lt 12; $i++) {
+  [DshRaise]::Force($hwnd)
+  Start-Sleep -Milliseconds 120
+  if ([DshRaise]::GetForegroundWindow() -eq $hwnd) { $ok = $true; break }
+}
+Write-Probe ('raised ok=' + $ok + ' responds=' + [DshRaise]::Responds($hwnd))
