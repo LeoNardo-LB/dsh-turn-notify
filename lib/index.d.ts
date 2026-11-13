@@ -148,9 +148,17 @@ export interface Config {
     fallbackTitle: string;
     fallbackMessage: string;
     questionChars: number;
+    /** 正文 {reply}：本轮 DSH 回复的前 N 个字符。 */
+    replyChars: number;
+    /** 启动时注册 AUMID 的 DisplayName + IconUri（归属区小图标）。 */
+    windowsAumidIcon: boolean;
+    /** 是否额外在正文左侧放 48×48 图标（appLogoOverride）。 */
+    inlineIcon: boolean;
     minRunMs: number;
 }
 export declare const Config: Schema<Config>;
+/** 注册 AUMID 的显示名与图标（HKCU，幂等，无需管理员）。 */
+export declare function ensureAumidRegistration(): void;
 /** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。
  * dsh 0.1.7+ 认证墙修复：URL 自动附加探测到的 token（query 在 hash 前）。 */
 export declare function deepLinkUrl(config: Config, sessionId: string): string;
@@ -189,7 +197,7 @@ export declare function buildBusctlNotifyArgs(appName: string, title: string, bo
  * 承载，或 sound=false）。归属 AUMID 直接决定显示名：默认 POWERSHELL_AUMID，
  * 传 DSH_AUMID 则显示 dsh（未注册 AUMID 的显示名即字符串本身，零文件）。
  */
-export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumid?: string): string;
+export declare function buildToastScript(title: string, body: string, launchUrl?: string, audio?: 'system' | 'silent', aumid?: string, iconUrl?: string): string;
 /**
  * 设置当前 PowerShell 进程显式 AUMID 的脚本（导出供测试解析验证）。
  * balloon 经 shell 提升为 toast 后归属取自进程 AUMID——设置后显示 dsh。

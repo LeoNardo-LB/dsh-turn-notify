@@ -90,21 +90,34 @@ web 会话列表是顶层行，照常通知）。
 | 部位 | 默认 | 来源 |
 |---|---|---|
 | 标题 | `{title}` → 会话标题 | 三级解析：live `session/title` 追踪 → 宿主 `sessionTitle` 服务日志折叠（覆盖重启后恢复的既有会话——历史标题事件是构造种子、不经事件总线重播，只有折叠读得到）→ fallbackTitle。仅首轮新会话在标题异步生成前会落到 fallback |
-| 正文 | `{question}` → 本轮用户提问的前 questionChars 字（默认 80，超出加 …） | user/message；只统计真人输入（source.kind === 'user'）。goal 续跑注入消息 source.kind === 'goal'，不污染提问文本——goal 完结时的通知正文因此正确显示最初的人类请求 |
-| 正文兜底 | 未捕获到提问时显示 fallbackMessage | — |
+| 正文 | `{reply}` → 本轮 DSH 回复的前 replyChars 字（默认 160，超出加 …） | assistant/message；取本轮最后一条（latest-wins），去掉 markdown/代码块、折叠空白。新提问进来时清空，避免中断轮次发旧回复 |
+| 正文回退 | 没捕获到回复 → `{question}`（本轮提问前 questionChars 字，默认 80）| user/message；只统计真人输入（source.kind === 'user'）|
+| 正文兜底 | 两者都没有 → fallbackMessage | — |
 
 `titleTemplate` / `bodyTemplate` 可自由编排，占位符
-`{title}` `{question}` `{sessionId}`。
+`{title}` `{question}` `{reply}` `{sessionId}`。
 
 ## 通知通道
 
 | 通道 | 默认 | Linux | macOS | Windows |
 |---|---|---|---|---|
 | desktopNotify（桌面 webview 在场） | auto | Web Notification API（页面内） | 同左 | 同左 |
-| notifySend（平台通道） | 开 | notify-send | osascript | balloon（auto）/ WinRT Toast |
+| notifySend（平台通道） | 开 | notify-send | osascript | WinRT Toast（桌面端 Electron 壳恒走此项）/ balloon（网页端 auto） |
 | sound | 开 | paplay | afplay | 系统通知音（默认）/ SoundPlayer |
 | bell | 关 | ASCII BEL | ASCII BEL | ASCII BEL |
 | command | 关 | /bin/sh -c | /bin/sh -c | cmd /c |
+
+## Windows 通知外观（归属区图标，0.2.2-dev.17+）
+
+Win11 toast 顶部那行「应用名 + 16px 小图标」是 shell 的**归属区**，XML 改不了：
+应用名取 `HKCU\Software\Classes\AppUserModelId\<AUMID>` 的 `DisplayName`，
+小图标取同键的 `IconUri`；正文左侧那张 48×48 图是另一回事（`appLogoOverride`）。
+
+- 插件启动时幂等写入 `HKCU\Software\Classes\AppUserModelId\DeepSeek.Harness` 的
+  `DisplayName=DeepSeek Harness` 与 `IconUri=<包内 icon.png>`（`windowsAumidIcon: false` 可关）；
+- **注册必须发生在该 AUMID 第一次发通知之前**——shell 会缓存首次见到的归属信息，
+  之后再写注册表不会补图标；换图标只改文件即可，不需要重启；
+- 正文默认不放大图标（`inlineIcon: false`，正文通栏）；想恢复 48×48 左图置 `inlineIcon: true`。
 
 ## 桌面客户端原生通知（desktopNotify，0.2.2-dev.16+）
 
@@ -185,6 +198,10 @@ profile cordis.patch.yml 里 id: turn-notify 整行替换，需重启）→
 turn-notify:
   sound: false
   questionChars: 30
+  replyChars: 160            # 正文取回复前多少字，0=不用回复
+  bodyTemplate: "{reply}"     # 也可用 {title} {question} {sessionId}
+  windowsAumidIcon: true     # 注册归属区显示名+小图标（写 HKCU 两个值）
+  inlineIcon: false          # true=正文左侧再放 48×48 大图标
   desktopNotify: auto        # auto=桌面在场走 webview 原生通知（默认）；off=恒平台通道
   desktopNotifyAckMs: 1500   # 原生投递的展示 ack 超时，超时平台通道兜底
 ```
