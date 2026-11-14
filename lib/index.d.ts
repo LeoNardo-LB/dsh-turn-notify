@@ -159,6 +159,15 @@ export interface Config {
 export declare const Config: Schema<Config>;
 /** 注册 AUMID 的显示名与图标（HKCU，幂等，无需管理员）。 */
 export declare function ensureAumidRegistration(): void;
+/**
+ * 注册 dshfocus:// 协议（HKCU，幂等，无需管理员）。
+ *
+ * 为什么必须走协议：Electron 原生通知的 click 只会回到渲染进程的 Notification
+ * 对象；从「通知中心」点卡片时激活走 COM 激活器 → 新进程 → 单实例锁失败即退出，
+ * 点击payload 丢失，页面永远收不到。改由 Windows 直接按协议调起置前脚本，
+ * 横幅点击与通知中心点击才是同一条路。
+ */
+export declare function ensureFocusProtocolRegistration(): boolean;
 /** 深链 URL：点击通知时打开（客户端插件读 hash 定位会话）。
  * dsh 0.1.7+ 认证墙修复：URL 自动附加探测到的 token（query 在 hash 前）。 */
 export declare function deepLinkUrl(config: Config, sessionId: string): string;
