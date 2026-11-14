@@ -77,6 +77,10 @@ type NativeNotificationCtor = (new (title: string, options?: { body?: string; si
 }
 const NativeNotification: NativeNotificationCtor | undefined = (window as unknown as { Notification?: NativeNotificationCtor }).Notification
 
+/** 活着的原生通知对象：Electron 把 click 路由到 JS 对象上，被 GC 掉后
+ * 通知中心里的卡片点了就没有反应，所以要保留引用（close 或超时再释放）。 */
+const liveNotifications = new Set<{ close(): void; addEventListener(ev: string, fn: () => void): void }>()
+
 export function apply(ctx: ClientContext): void {
   // 每行前缀带版本（与宿主端一致，调试时任意一行可识别版本）
   const log = (...a: unknown[]) => console.log('[turn-notify/client v' + TN_VERSION + ']', ...a)
@@ -150,6 +154,15 @@ export function apply(ctx: ClientContext): void {
       }
       // 展示回执以 show 事件为准；个别平台事件缺失时短定时器兜底
       //（ack 端点幂等，重复到达无害）
+      // 保留引用：通知中心里的卡片可能在几分钟后才被点，GC 掉就没有 click 了
+      liveNotifications.add(notification)
+      notification.addEventListener('close', () => { liveNotifications.delete(notification) })
+      setTimeout(() => { liveNotifications.delete(notification) }, 30 * 60 * 1000)
+      if (liveNotifications.size > 8) {
+        for (const old of [...liveNotifications].slice(0, liveNotifications.size - 8)) {
+          liveNotifications.delete(old)
+        }
+      }
       notification.addEventListener('show', ack)
       setTimeout(ack, 400)
       notification.addEventListener('click', () => {
