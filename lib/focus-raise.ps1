@@ -68,6 +68,7 @@ public static class DshRaise {
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr res);
+  public static string Title(IntPtr h) { var sb = new StringBuilder(512); GetWindowText(h, sb, 512); return sb.ToString(); }
   public static IntPtr Find(string needle) {
     IntPtr found = IntPtr.Zero;
     EnumWindows((h, l) => {
@@ -82,7 +83,7 @@ public static class DshRaise {
     IntPtr res;
     return SendMessageTimeout(h, 0, IntPtr.Zero, IntPtr.Zero, 0x0002 | 0x0001, 1200, out res) != IntPtr.Zero;
   }
-  /** 挂到当前前台线程再抢前台；调用前窗口应已可见（由 Electron 负责 show）。 */
+  /** 挂到当前前台线程再抢前台；topmost 抖动用于压过通知中心/开始菜单等 flyout。 */
   public static void Force(IntPtr hwnd) {
     uint pid;
     IntPtr fg = GetForegroundWindow();
@@ -93,9 +94,11 @@ public static class DshRaise {
       if (fgThread != 0 && fgThread != me) attached = AttachThreadInput(me, fgThread, true);
       keybd_event(0x12, 0, 0, UIntPtr.Zero);
       keybd_event(0x12, 0, 2, UIntPtr.Zero);
+      SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
       BringWindowToTop(hwnd);
       SetForegroundWindow(hwnd);
       SwitchToThisWindow(hwnd, true);
+      SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
     } finally {
       if (attached) AttachThreadInput(me, fgThread, false);
     }
@@ -129,9 +132,9 @@ if (-not [DshRaise]::IsWindowVisible($hwnd)) {
 
 # 2) 只抢前台，重复到真的成为前台窗口
 $ok = $false
-for ($i = 0; $i -lt 12; $i++) {
+for ($i = 0; $i -lt 30; $i++) {
   [DshRaise]::Force($hwnd)
-  Start-Sleep -Milliseconds 120
+  Start-Sleep -Milliseconds 150
   if ([DshRaise]::GetForegroundWindow() -eq $hwnd) { $ok = $true; break }
 }
-Write-Probe ('raised ok=' + $ok + ' responds=' + [DshRaise]::Responds($hwnd))
+Write-Probe ('raised ok=' + $ok + ' responds=' + [DshRaise]::Responds($hwnd) + ' fg=[' + [DshRaise]::Title([DshRaise]::GetForegroundWindow()) + ']')
